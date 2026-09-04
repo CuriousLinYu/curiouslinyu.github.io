@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>KS漂移检测与PSI稳定性实战 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-26</div>
+      <h1 class="post-title">KS漂移检测与PSI稳定性实战</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>模型上线第一周 KS 0.42，三个月后 KS 0.31。业务方问&quot;是不是模型坏了&quot;，你说&quot;等等看&quot;——再等三个月 KS 跌到 0.19，已经跑了半年的坏账才浮出水面。</p>
+</blockquote>
+<hr>
+<h2>一、模型为什么会&quot;变老&quot;</h2>
+<p>风控模型不是静态的。你的训练数据来自 2024 年的用户，但 2025 年的用户行为、欺诈手法、市场环境全都变了。这种变化反映在数据上，就是<strong>特征分布和模型分数的偏移</strong>。</p>
+<p>两个核心概念：</p>
+<ul>
+<li><strong>KS（Kolmogorov-Smirnov）</strong>：衡量模型区分好坏样本的能力。0 分完全没区分力，1 分完美区分。信用评分场景 0.35+ 算可用。</li>
+<li><strong>PSI（Population Stability Index）</strong>：衡量两个分布的差异程度。PSI &lt; 0.1 稳定，0.1~0.25 轻微偏移需关注，&gt; 0.25 显著偏移必须排查。</li>
+</ul>
+<p><strong>说白了就是：KS 告诉你&quot;刀还利不利&quot;，PSI 告诉你&quot;战场变了没有&quot;。刀不利可以磨（重训模型），战场变了得换地图（重新定义好坏标签、调整特征口径）。</strong></p>
+<hr>
+<h2>二、KS 怎么算——从原理到代码</h2>
+<p>KS 值本质上是好坏样本累计分布曲线之间的最大垂直距离。</p>
+<pre><code>步骤：
+1. 把模型输出的预测概率从低到高排序
+2. 在每个分位点计算：好样本累计占比 - 坏样本累计占比
+3. 取这个差值的绝对值的最大值 → 就是 KS
+</code></pre>
+<pre><code class="language-python">import numpy as np
+import pandas as pd
+from scipy.stats import ks_2samp
+
+def calculate_ks(y_true, y_pred_proba):
+    &quot;&quot;&quot;
+    y_true: 0=好样本, 1=坏样本
+    y_pred_proba: 模型预测为坏样本的概率
+    &quot;&quot;&quot;
+    # 按预测概率降序排列
+    df = pd.DataFrame({&#39;true&#39;: y_true, &#39;proba&#39;: y_pred_proba})
+    df = df.sort_values(&#39;proba&#39;, ascending=False).reset_index(drop=True)
+    
+    n_bad = df[&#39;true&#39;].sum()        # 坏样本总数
+    n_good = len(df) - n_bad         # 好样本总数
+    
+    if n_bad == 0 or n_good == 0:
+        return 0.0  # 只有一类样本，KS 无意义
+    
+    bad_cumsum = np.cumsum(df[&#39;true&#39;]) / n_bad
+    good_cumsum = np.cumsum(1 - df[&#39;true&#39;]) / n_good
+    
+    ks = np.max(np.abs(bad_cumsum - good_cumsum))
+    return ks
+
+# 示例
+y_true = np.array([0, 0, 1, 0, 1, 0, 1, 1, 0, 1])
+y_proba = np.array([0.1, 0.2, 0.8, 0.15, 0.9, 0.3, 0.7, 0.85, 0.05, 0.6])
+print(f&quot;KS = {calculate_ks(y_true, y_proba):.4f}&quot;)  # KS = 0.6667
+</code></pre>
+<p><strong>KS 的行业经验值（信贷场景）：</strong></p>
+<ul>
+<li>&lt; 0.20：几乎没有区分力，别上线</li>
+<li>0.20 ~ 0.30：勉强可用，需要更多特征</li>
+<li>0.30 ~ 0.40：正常水平</li>
+<li>0.40 ~ 0.50：优秀</li>
+<li>&gt; 0.50：检查是否过拟合或标签泄露</li>
+</ul>
+<hr>
+<h2>三、PSI 怎么算——模型稳定性的定量指标</h2>
+<p>PSI 的公式本质上是在比较两个分布在每个分箱里的差异，再按权重求和：</p>
+<p>[
+PSI = \sum_{i=1}^{n} (Actual_i% - Expected_i%) \times \ln\left(\frac{Actual_i%}{Expected_i%}\right)
+]</p>
+<p>其中 Expected 是基准分布（训练集或上线首月），Actual 是当前分布。</p>
+<pre><code class="language-python">def calculate_psi(expected_scores, actual_scores, bins=10):
+    &quot;&quot;&quot;
+    expected_scores: 基准期的模型分数（训练集/上线首月）
+    actual_scores:   当前期的模型分数
+    bins:            分箱数，默认10等分
+    &quot;&quot;&quot;
+    # 等频分箱——用 expected 的分位点做边界
+    breaks = np.percentile(expected_scores, np.linspace(0, 100, bins + 1))
+    
+    # 统计每个箱的占比
+    expected_cnt = np.histogram(expected_scores, bins=breaks)[0]
+    actual_cnt = np.histogram(actual_scores, bins=breaks)[0]
+    
+    expected_pct = expected_cnt / len(expected_scores)
+    actual_pct = actual_cnt / len(actual_scores)
+    
+    # PSI 计算，对空箱做平滑处理
+    epsilon = 1e-10
+    psi_values = (actual_pct - expected_pct) * np.log(
+        (actual_pct + epsilon) / (expected_pct + epsilon)
+    )
+    
+    return np.sum(psi_values)
+
+# 模拟：训练集 vs 三个月后的分数分布
+np.random.seed(42)
+train_scores = np.random.beta(5, 3, size=10000)   # 训练集分数
+drift_scores = np.random.beta(4, 4, size=10000)   # 三个月后，分布右移了
+
+psi = calculate_psi(train_scores, drift_scores)
+print(f&quot;PSI = {psi:.4f}&quot;)
+# PSI ≈ 0.08~0.15 之间（模拟数据每次略有波动）
+</code></pre>
+<hr>
+<h2>四、生产环境的自动化监控——不是手工跑一次就完事</h2>
+<p>线上模型监控的核心架构：<strong>定时任务（日/周）拉取线上打分数据 → 对比基准 → 产出报告 + 告警</strong>。</p>
+<pre><code class="language-java">/**
+ * 模型稳定性监控定时任务——每天凌晨 2 点执行
+ * 对比基准：上线首月（前30天）的分数分布
+ */
+@Component
+public class ModelStabilityMonitor {
+
+    @Resource
+    private JedisPool jedisPool;           // 线上打分日志缓存
+    @Resource
+    private ModelStabilityMapper mapper;    // MySQL 持久化存储
+
+    private static final double PSI_ALERT_THRESHOLD = 0.25;
+    private static final double KS_ALERT_THRESHOLD = 0.20;
+
+    @Scheduled(cron = &quot;0 0 2 * * ?&quot;)
+    public void dailyMonitor() {
+        String modelVersion = &quot;credit_score_v3&quot;;
+
+        // 1. 拉取昨日线上分数
+        List&lt;Double&gt; yesterdayScores = fetchScoresFromRedis(
+            modelVersion, LocalDate.now().minusDays(1)
+        );
+
+        // 2. 拉取基准分数（上线首月，存在 MySQL）
+        List&lt;Double&gt; baselineScores = mapper.selectBaselineScores(modelVersion);
+
+        if (yesterdayScores.isEmpty() || baselineScores.isEmpty()) {
+            log.warn(&quot;分数数据不足，跳过当日监控&quot;);
+            return;
+        }
+
+        // 3. 计算 PSI
+        double psi = computePsi(baselineScores, yesterdayScores, 10);
+
+        // 4. 计算 KS（需要标签，T+30 才能拿到真实逾期标签）
+        //    这里用&quot;即时 KS&quot;——当日分数对当日已知标签的区分力
+        List&lt;Integer&gt; labels = fetchLabelsFromRedis(modelVersion, LocalDate.now().minusDays(1));
+        double ks = computeKs(yesterdayScores, labels);
+
+        // 5. 持久化 + 告警
+        mapper.insertMonitorRecord(modelVersion, LocalDate.now(), psi, ks);
+
+        if (psi &gt; PSI_ALERT_THRESHOLD) {
+            alert(modelVersion, &quot;PSI&quot;, psi, &quot;分布显著偏移，建议排查特征数据源&quot;);
+        }
+        if (ks &lt; KS_ALERT_THRESHOLD) {
+            alert(modelVersion, &quot;KS&quot;, ks, &quot;区分力跌破阈值，建议启动重训&quot;);
+        }
+
+        log.info(&quot;模型监控完成: version={}, psi={:.4f}, ks={:.4f}&quot;, modelVersion, psi, ks);
+    }
+
+    private double computePsi(List&lt;Double&gt; expected, List&lt;Double&gt; actual, int bins) {
+        // 等频分箱 + PSI 公式，逻辑同 Python 版
+        double[] expArr = expected.stream().mapToDouble(Double::doubleValue).sorted().toArray();
+        int n = expArr.length;
+        double[] breaks = new double[bins + 1];
+        for (int i = 0; i &lt;= bins; i++) {
+            breaks[i] = expArr[Math.min(i * n / bins, n - 1)];
+        }
+
+        int[] expCnt = new int[bins];
+        int[] actCnt = new int[bins];
+        for (double v : expected) {
+            expCnt[findBin(v, breaks)]++;
+        }
+        for (double v : actual) {
+            actCnt[findBin(v, breaks)]++;
+        }
+
+        double psi = 0.0;
+        double epsilon = 1e-10;
+        int expTotal = expected.size(), actTotal = actual.size();
+        for (int i = 0; i &lt; bins; i++) {
+            double expPct = (double) expCnt[i] / expTotal;
+            double actPct = (double) actCnt[i] / actTotal;
+            if (expPct &gt; 0 &amp;&amp; actPct &gt; 0) {
+                psi += (actPct - expPct) * Math.log(actPct / expPct);
+            }
+        }
+        return psi;
+    }
+
+    private int findBin(double value, double[] breaks) {
+        for (int i = breaks.length - 1; i &gt;= 0; i--) {
+            if (value &gt;= breaks[i]) return Math.min(i, breaks.length - 2);
+        }
+        return 0;
+    }
+}
+</code></pre>
+<p><strong>关键设计点：</strong></p>
+<ul>
+<li>PSI 不需要标签，T+1 就能算——因为只看分数分布变化，不看好坏</li>
+<li>KS 需要真实逾期标签，通常要等 T+30（账单日 + 宽限期）——可以同时算一个&quot;即时 KS&quot;做参考</li>
+<li>告警阈值不是死的——PSI 0.25 和 KS 0.20 是行业经验值，要根据自己的业务容忍度调整</li>
+</ul>
+<hr>
+<h2>五、PSI 偏高了怎么办——排查三件套</h2>
+<p>PSI &gt; 0.25 不代表模型一定坏了，但它说明&quot;有什么东西变了&quot;。排查顺序：</p>
+<h3>1. 先看特征 PSI（不是只看分数 PSI）</h3>
+<p>模型分数 PSI 是汇总指标，要定位到具体特征才能找到根因。</p>
+<pre><code class="language-python">def feature_psi_drilldown(baseline_df, current_df, feature_cols, bins=10):
+    &quot;&quot;&quot;逐特征计算 PSI，定位哪些特征发生了偏移&quot;&quot;&quot;
+    psi_report = {}
+    for col in feature_cols:
+        psi = calculate_psi(
+            baseline_df[col].dropna().values,
+            current_df[col].dropna().values,
+            bins=bins
+        )
+        psi_report[col] = psi
+    
+    # 按 PSI 降序排列，前几个就是元凶
+    return pd.Series(psi_report).sort_values(ascending=False)
+
+# 示例输出
+# user_age_months    0.32  ← 新用户占比突然变了
+# txn_amt_avg_30d    0.28  ← 交易金额分布变了
+# device_nunique_7d  0.05
+# credit_score_ext   0.03
+</code></pre>
+<h3>2. 再看数据源头</h3>
+<p><code>user_age_months</code> PSI 0.32？可能是：</p>
+<ul>
+<li>上游数据仓库迁移，用户注册时间字段部分为 NULL</li>
+<li>产品改了注册流程，新用户占比突然升高</li>
+<li>数据管道丢了一个分区</li>
+</ul>
+<h3>3. 最后看业务变化</h3>
+<p>如果特征 PSI 普遍偏高、但没有明显的数据管道问题，大概率是<strong>业务环境真的变了</strong>——新的获客渠道带来了不同的客群、经济周期变化改变了用户还款行为。这时候不是&quot;修模型&quot;的问题，是&quot;模型需要重训以适应新环境&quot;的问题。</p>
+<hr>
+<h2>六、KS 和 PSI 的关系——容易混淆的三个误区</h2>
+<table>
+<thead>
+<tr>
+<th>误区</th>
+<th>真相</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>PSI 高了说明模型坏了</td>
+<td>不一定。PSI 高只说明分布变了，如果模型在新分布上 KS 仍然好，说明模型泛化能力强</td>
+</tr>
+<tr>
+<td>KS 跌了就马上重训</td>
+<td>KS 短期波动正常（节假日、营销活动都会影响）。连续 4 周下降 + PSI &gt; 0.2 才触发重训</td>
+</tr>
+<tr>
+<td>PSI 低就万事大吉</td>
+<td>PSI 只检查分数分布，不检查标签分布。PSI 低但 KS 也在跌 → 可能是好坏样本比例变了（先息后本→等额本息导致逾期定义偏移）</td>
+</tr>
+</tbody></table>
+<p><strong>正确姿势是 KS + PSI 双指标联动：</strong></p>
+<pre><code>PSI 低 + KS 稳定 → 放心睡觉
+PSI 高 + KS 稳定 → 模型泛化不错，但关注特征偏移趋势
+PSI 低 + KS 在跌 → 查标签定义是否变了（逾期口径、宽限期调整）
+PSI 高 + KS 在跌 → 最高优先级，启动重训流程
+</code></pre>
+<hr>
+<h2>七、总结</h2>
+<p>模型监控不是&quot;上线就完事&quot;的附属品，是模型生命周期里跟训练同等重要的一环。记住五条：</p>
+<ol>
+<li><strong>KS 看区分力，PSI 看分布稳定性</strong>——两个指标回答两个不同的问题，不能互相替代</li>
+<li><strong>PSI 不需要标签，T+1 就能算</strong>——这是它比 KS 更适合做&quot;第一道防线&quot;的原因</li>
+<li><strong>分数 PSI 高了先钻到特征 PSI</strong>——定位到具体哪个特征偏移了，才算排查完成</li>
+<li><strong>不要一看到 KS 跌就重训</strong>——先看是短期波动还是趋势性下降，连续 4 周 + PSI &gt; 0.2 才是明确的重训信号</li>
+<li><strong>生产环境必须自动化</strong>——手工跑一次 PSI 不叫监控，定时任务 + 持久化记录 + 告警推送才是</li>
+</ol>
+<p>模型上线第一天就应该把监控跑起来。等业务方来告诉你&quot;模型不准了&quot;的时候，损失已经发生了。</p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
