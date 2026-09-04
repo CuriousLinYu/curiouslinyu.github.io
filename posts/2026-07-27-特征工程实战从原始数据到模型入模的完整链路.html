@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>特征工程实战从原始数据到模型入模的完整链路 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-27</div>
+      <h1 class="post-title">特征工程实战从原始数据到模型入模的完整链路</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>特征工程占了风控建模 80% 的工作量。不是你模型调得不好，是你的特征根本就没把信息榨干。这篇文章不讲&quot;特征工程很重要&quot;这种废话，只讲怎么做。</p>
+</blockquote>
+<hr>
+<h2>1. 时间窗口：风控特征的生命线</h2>
+<p>风控场景下，所有特征必须带时间窗口。没带窗口的特征 = 数据泄露。</p>
+<h3>1.1 标签窗口（Label Window）</h3>
+<pre><code>观测期（OBS）     表现期（PER）
+├───────────┼─────────────┤
+  12个月          6个月
+
+申请时间点 T=0，往前看 12 个月做特征，往后看 6 个月看是否逾期
+</code></pre>
+<pre><code class="language-python">def define_label(row, obs_end, perf_end):
+    &quot;&quot;&quot;
+    标签必须在观测期之后才能用，否则是未来信息
+    &quot;&quot;&quot;
+    if row[&quot;loan_date&quot;] &lt; obs_end:
+        return &quot;exclude&quot;          # 观测期内的样本不能用
+    if row.get(&quot;overdue_days_after_perf&quot;, 0) &gt;= 30:
+        return 1
+    return 0
+</code></pre>
+<p><strong>铁律</strong>：样本的 X 只能来自该样本的申请时间之前，Y 只能来自申请时间之后。违反这一点，所有 AUC 都是假的。</p>
+<h3>1.2 多粒度时间窗口</h3>
+<pre><code class="language-python">WINDOWS = [7, 14, 30, 90, 180, 365]  # 天
+
+def build_temporal_features(user_id, base_date):
+    features = {}
+    for w in WINDOWS:
+        start = base_date - timedelta(days=w)
+        window_data = query(f&quot;&quot;&quot;SELECT
+            COUNT(*) AS cnt,
+            SUM(amount) AS total_amt,
+            AVG(amount) AS avg_amt
+            FROM transactions
+            WHERE user_id = {user_id}
+              AND trans_date BETWEEN &#39;{start}&#39; AND &#39;{base_date}&#39;&quot;&quot;&quot;)
+
+        features[f&quot;tx_cnt_{w}d&quot;]      = window_data[&quot;cnt&quot;]
+        features[f&quot;tx_total_{w}d&quot;]    = window_data[&quot;total_amt&quot;]
+        features[f&quot;tx_avg_{w}d&quot;]      = window_data[&quot;avg_amt&quot;]
+
+    # 窗口间比率（比绝对值更稳定）
+    features[&quot;tx_cnt_ratio_7_30&quot;]   = features[&quot;tx_cnt_7d&quot;]  / max(features[&quot;tx_cnt_30d&quot;], 1)
+    features[&quot;tx_cnt_ratio_7_90&quot;]   = features[&quot;tx_cnt_7d&quot;]  / max(features[&quot;tx_cnt_90d&quot;], 1)
+    features[&quot;tx_amount_ratio_7_30&quot;]= features[&quot;tx_total_7d&quot;]/ max(features[&quot;tx_total_30d&quot;], 0.01)
+
+    return features
+</code></pre>
+<p><strong>为什么非要多个窗口</strong>：</p>
+<ul>
+<li>短窗口（7d/14d）捕捉短期异常——黑产不会等你三个月</li>
+<li>长窗口（90d/180d）刻画长期行为基线</li>
+<li>窗口间比率（7d/30d/90d）反映行为突变，比绝对值更有区分力</li>
+</ul>
+<hr>
+<h2>2. 衍生特征：不造就是浪费</h2>
+<h3>2.1 比率特征</h3>
+<p>原始值受基数影响，换成比率立即消除&quot;不同用户体量不同&quot;的噪声：</p>
+<pre><code class="language-python"># ❌ 差
+features[&quot;avg_balance&quot;] = avg_balance(user_id)
+
+# ✅ 好：负债收入比、额度使用率
+features[&quot;dti&quot;] = total_debt / max(income, 1)
+features[&quot;utilization&quot;] = current_balance / max(credit_limit, 1)
+features[&quot;installment_ratio&quot;] = installment_cnt / max(total_loan_cnt, 1)
+</code></pre>
+<h3>2.2 时间间隔特征</h3>
+<p>事件之间的时间间隔往往比事件本身更有信息量：</p>
+<pre><code class="language-python">def build_interval_features(user_id):
+    events = query(f&quot;SELECT trans_date, trans_type FROM transactions WHERE user_id={user_id} ORDER BY trans_date&quot;)
+
+    features = {}
+    for label, event_type in [(&quot;loan&quot;, &quot;借款&quot;), (&quot;repay&quot;, &quot;还款&quot;), (&quot;apply&quot;, &quot;申请&quot;)]:
+        type_events = [e for e in events if e[&quot;trans_type&quot;] == event_type]
+        if len(type_events) &gt;= 2:
+            intervals = [(type_events[i+1][&quot;trans_date&quot;] - type_events[i][&quot;trans_date&quot;]).days
+                         for i in range(len(type_events) - 1)]
+            features[f&quot;{label}_avg_interval&quot;] = sum(intervals) / len(intervals)
+            features[f&quot;{label}_min_interval&quot;] = min(intervals)
+            features[f&quot;{label}_interval_std&quot;] = stdev(intervals) if len(intervals) &gt; 1 else 0
+
+    # 最后一次事件距今（最近一次行为决定了意图）
+    for label, event_type in [(&quot;loan&quot;, &quot;借款&quot;), (&quot;apply&quot;, &quot;申请&quot;)]:
+        type_events = [e for e in events if e[&quot;trans_type&quot;] == event_type]
+        if type_events:
+            features[f&quot;days_since_last_{label}&quot;] = (base_date - type_events[-1][&quot;trans_date&quot;]).days
+
+    return features
+</code></pre>
+<p>最近一次借款距今 3 天 vs 3 个月——这两个人的行为模式完全不同，但&quot;总借款次数&quot;这个特征表现可能一样。</p>
+<hr>
+<h2>3. 分箱：连续变量到离散特征的转化</h2>
+<h3>3.1 WOE 编码（Weight of Evidence）</h3>
+<pre><code class="language-python">import numpy as np
+
+def calc_woe(df, feature, target, bins=10):
+    &quot;&quot;&quot;WOE = ln((坏样本占比) / (好样本占比))&quot;&quot;&quot;
+    df = df.copy()
+    df[&quot;bin&quot;] = pd.qcut(df[feature], q=bins, duplicates=&quot;drop&quot;)
+
+    grouped = df.groupby(&quot;bin&quot;)[target].agg([&quot;count&quot;, &quot;sum&quot;])
+    grouped[&quot;bad&quot;] = grouped[&quot;sum&quot;]
+    grouped[&quot;good&quot;] = grouped[&quot;count&quot;] - grouped[&quot;sum&quot;]
+    total_bad = grouped[&quot;bad&quot;].sum()
+    total_good = grouped[&quot;good&quot;].sum()
+
+    grouped[&quot;bad_pct&quot;] = grouped[&quot;bad&quot;] / total_bad
+    grouped[&quot;good_pct&quot;] = grouped[&quot;good&quot;] / total_good
+    grouped[&quot;woe&quot;] = np.log(grouped[&quot;bad_pct&quot;] / grouped[&quot;good_pct&quot;])
+    grouped[&quot;iv&quot;] = (grouped[&quot;bad_pct&quot;] - grouped[&quot;good_pct&quot;]) * grouped[&quot;woe&quot;]
+
+    # IV &lt; 0.02: 无预测能力，该特征可以直接丢弃
+    return grouped[&quot;iv&quot;].sum(), grouped
+
+iv, woe_table = calc_woe(train_df, &quot;age&quot;, &quot;is_bad&quot;)
+print(f&quot;IV = {iv:.4f}&quot;)  # &lt; 0.02 考虑丢弃，&gt; 0.3 强预测力
+</code></pre>
+<p>WOE 的本质：把每个分箱的违约率映射为一个数值。不是简单分段，而是让分段的数值含义与目标变量直接关联。</p>
+<h3>3.2 什么时候别用分箱</h3>
+<ul>
+<li>样本量不够（&lt; 1000）：分箱后每个箱太少，WOE 不稳定</li>
+<li>时间序列特征：分箱丢掉顺序信息</li>
+<li>已经做了标准化的连续特征：再分箱是画蛇添足</li>
+</ul>
+<hr>
+<h2>4. 缺失值不是填个 0 就完了</h2>
+<pre><code class="language-python">def handle_missing(df, feature):
+    &quot;&quot;&quot;三个策略，按场景选&quot;&quot;&quot;
+    # 策略 1：缺失本身是信号（如&quot;收入&quot;为空 = 无业/自由职业）
+    df[f&quot;{feature}_is_missing&quot;] = df[feature].isna().astype(int)
+
+    # 策略 2：业务合理默认值（如&quot;逾期次数&quot;为空 = 从未逾期 = 0）
+    df[feature] = df[feature].fillna(0)
+
+    # 策略 3：极大极小值标记缺失（树模型友好）
+    df[feature] = df[feature].fillna(-9999)  # 树模型把 -9999 当独立分支
+
+    return df
+</code></pre>
+<p><strong>规则</strong>：策略 1 对所有特征统一做；策略 2 和 3 之间，连续变量优先策略 3（保留缺失信号），计数变量优先策略 2。</p>
+<hr>
+<h2>5. 特征筛选：不是越多越好</h2>
+<pre><code class="language-python">def select_features(X_train, y_train, max_features=50):
+    # 1. 方差过滤（常数特征直接丢）
+    constant_cols = [c for c in X_train.columns if X_train[c].nunique() == 1]
+    X = X_train.drop(columns=constant_cols)
+
+    # 2. 相关性去重（两两相关系数 &gt; 0.9 的只留 IV 高的）
+    corr = X.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape), k=1).astype(bool))
+    to_drop = [c for c in upper.columns if any(upper[c] &gt; 0.9)]
+
+    # 3. IV 值筛选（&lt; 0.02 的特征没有预测力）
+    iv_scores = {c: calc_woe_df(X, c, y_train)[0] for c in X.columns}
+    low_iv = [c for c, iv in iv_scores.items() if iv &lt; 0.02]
+
+    # 4. 递归特征消除（贪心保留 Top-N）
+    from sklearn.feature_selection import RFE
+    from xgboost import XGBClassifier
+    selector = RFE(XGBClassifier(), n_features_to_select=max_features)
+    selector.fit(X.drop(columns=to_drop + low_iv), y_train)
+
+    return selector.get_support(indices=True)
+</code></pre>
+<p><strong>顺序不能错</strong>：先方差过滤 → 再相关性去重 → 再 IV 筛选 → 最后 RFE 选 Top-N。方差过滤最快，放第一步减少后续计算量。</p>
+<hr>
+<h2>6. 一条完整链路</h2>
+<pre><code>原始数据
+    ↓ 标签窗口定义（OBS 12M + PER 6M）
+特征工程层
+    ├─ 时间窗口聚合（7d/14d/30d/90d/180d）
+    ├─ 窗口间比率（短期/长期 → 行为突变）
+    ├─ 时间间隔特征（上次距今天数）
+    ├─ 比率特征（DTI / 额度使用率）
+    └─ 缺失值信号（缺失 = 特征）
+    ↓
+特征筛选
+    ├─ 方差过滤（去常数）
+    ├─ 相关性去重（r &gt; 0.9）
+    ├─ IV 筛选（IV &lt; 0.02）
+    └─ RFE Top-50
+    ↓
+WOE 分箱 → XGBoost / LR 入模
+</code></pre>
+<hr>
+<h2>关键决策清单</h2>
+<ul>
+<li><input disabled="" type="checkbox"> 标签窗口是否严格分离了观测期和表现期？</li>
+<li><input disabled="" type="checkbox"> 是否有至少 3 个不同粒度的时间窗口？（7d/30d/90d 起步）</li>
+<li><input disabled="" type="checkbox"> 是否有短期/长期的窗口间比率特征？</li>
+<li><input disabled="" type="checkbox"> 是否有&quot;距最近一次行为的天数&quot;间隔特征？</li>
+<li><input disabled="" type="checkbox"> 连续变量缺失是否用 -9999 标记（而非填均值）？</li>
+<li><input disabled="" type="checkbox"> 是否先做了方差过滤再进 IV 筛选（减少无效计算）？</li>
+</ul>
+<hr>
+<p><em>下一篇预告：AI 应用方向——「Prompt Engineering 方法论：不是写提示词，是设计交互协议」</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
