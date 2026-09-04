@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>FunctionCalling设计模式从一次调用到生产级工具编排 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-24</div>
+      <h1 class="post-title">FunctionCalling设计模式从一次调用到生产级工具编排</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>别再用 <code>if-else</code> 解析 LLM 返回的 JSON 来做工具调用了——Function Calling 真正的价值在编排层，不在调用层。</p>
+</blockquote>
+<hr>
+<h2>1. 你是怎么用 Function Calling 的？</h2>
+<p>大多数人的用法：</p>
+<pre><code class="language-python"># ❌ 做法一：让 LLM 返回 JSON，然后自己 if-else
+response = llm.chat(&quot;用户想查北京天气&quot;)
+tool_name = json.loads(response)[&quot;tool&quot;]
+if tool_name == &quot;get_weather&quot;:
+    result = get_weather(&quot;北京&quot;)
+elif tool_name == &quot;get_stock&quot;:
+    result = get_stock(&quot;000001&quot;)
+</code></pre>
+<p>这不是 Function Calling——这是在用 LLM 做意图识别 + if-else 路由。问题很明显：每加一个工具就要改代码，工具之间的调用链只能硬编码。</p>
+<p>真正的 Function Calling，让 LLM 决定<strong>调用哪个工具</strong>、<strong>传什么参数</strong>、以及<strong>调用结果怎么用</strong>。你只需描述工具，不写路由逻辑。</p>
+<hr>
+<h2>2. 三步理解 Function Calling 的本质</h2>
+<pre><code>用户: &quot;帮我查一下北京今天天气，如果下雨就提醒我带伞&quot;
+
+Step 1: LLM 决定调用 get_weather(city=&quot;北京&quot;)
+         → 返回 function_call，不返回文字
+
+Step 2: 你的代码执行 get_weather(&quot;北京&quot;)
+         → 拿到 {&quot;weather&quot;: &quot;小雨&quot;, &quot;temp&quot;: 22}
+
+Step 3: 把结果喂回 LLM，LLM 生成最终回复
+         → &quot;北京今天小雨，22°C，记得带伞！&quot;
+</code></pre>
+<p>说白了就三步：<strong>LLM 说&quot;我要调这个&quot; → 你调了 → 结果还给 LLM</strong>。LLM 负责决策，你负责执行。路由逻辑不在你代码里，在模型推理里。</p>
+<hr>
+<h2>3. 工具定义：描述比实现重要</h2>
+<p>工具定义不是给代码看的，是给 LLM 看的。写得好坏直接影响调用准确率：</p>
+<pre><code class="language-python">tools = [
+    {
+        &quot;type&quot;: &quot;function&quot;,
+        &quot;function&quot;: {
+            &quot;name&quot;: &quot;get_weather&quot;,
+            &quot;description&quot;: &quot;获取指定城市的实时天气信息。返回包含天气状况、温度(℃)、湿度的 JSON&quot;,
+            &quot;parameters&quot;: {
+                &quot;type&quot;: &quot;object&quot;,
+                &quot;properties&quot;: {
+                    &quot;city&quot;: {
+                        &quot;type&quot;: &quot;string&quot;,
+                        &quot;description&quot;: &quot;城市中文名，如&#39;北京&#39;、&#39;上海&#39;。不要传拼音或英文&quot;
+                    }
+                },
+                &quot;required&quot;: [&quot;city&quot;]
+            }
+        }
+    }
+]
+</code></pre>
+<h3>三个血的教训</h3>
+<p><strong>教训 1：description 要写返回值结构</strong>。LLM 需要知道调用后能得到什么，才能判断&quot;值不值得调&quot;。只写&quot;获取天气&quot;不够，要写&quot;返回天气状况、温度、湿度&quot;。</p>
+<p><strong>教训 2：参数 description 要包含反例</strong>。<code>&quot;城市中文名，如&#39;北京&#39;、&#39;上海&#39;。不要传拼音或英文&quot;</code> — 这个&quot;不要传&quot;很关键。LLM 默认倾向用英文，不加反例大概率传 <code>&quot;Beijing&quot;</code>。</p>
+<p><strong>教训 3：required 字段要精准</strong>。把不该 required 的标成 required，LLM 会强行编造值来满足约束。比如地址查询把 <code>street</code> 标成 required，用户只说&quot;朝阳区&quot;，LLM 就会编个 <code>&quot;朝阳路 1 号&quot;</code>。</p>
+<hr>
+<h2>4. 并行调用：让 LLM 一次调多个工具</h2>
+<p>真实场景很少只调一个工具。&quot;帮我比较北京和上海的天气&quot;——这是两个独立查询，应该并行：</p>
+<pre><code class="language-python"># OpenAI 的 parallel_tool_calls 默认开启
+response = client.chat.completions.create(
+    model=&quot;gpt-4o&quot;,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;比较北京、上海、广州今天的天气&quot;}],
+    tools=tools,
+    tool_choice=&quot;auto&quot;  # LLM 自己决定是否调、调几个
+)
+
+# 可能返回 3 个 tool_calls，你的代码并发执行
+import concurrent.futures
+
+def execute_tool_call(tc):
+    args = json.loads(tc.function.arguments)
+    func = TOOL_MAP[tc.function.name]
+    return tc.id, func(**args)
+
+with concurrent.futures.ThreadPoolExecutor() as executor:
+    futures = [executor.submit(execute_tool_call, tc) for tc in response.choices[0].message.tool_calls]
+    results = {f.result()[0]: f.result()[1] for f in futures}
+
+# 把所有结果一次性喂回 LLM
+</code></pre>
+<p><strong>关键细节</strong>：每个 tool_call 有唯一 <code>id</code>，返回结果时要把 <code>tool_call_id</code> 对上。LLM 靠这个 id 区分&quot;这个结果是哪个调用的&quot;——错了会导致 LLM 张冠李戴。</p>
+<hr>
+<h2>5. 串行依赖：一个工具的输出是另一个的输入</h2>
+<p>这是并行搞不定的场景。&quot;查一下马云担任法人的公司最近一年的营收&quot;——必须先查公司名，再查营收。</p>
+<pre><code class="language-python">def run_agent_with_tools(user_query: str, max_rounds: int = 5) -&gt; str:
+    messages = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: user_query}]
+
+    for _ in range(max_rounds):
+        response = client.chat.completions.create(
+            model=&quot;gpt-4o&quot;,
+            messages=messages,
+            tools=tools,
+            tool_choice=&quot;auto&quot;
+        )
+        msg = response.choices[0].message
+
+        if msg.tool_calls is None:
+            return msg.content  # LLM 决定不调了，返回最终答案
+
+        # 追加 assistant 消息（含 tool_calls）
+        messages.append(msg)
+
+        # 执行每个 tool_call，结果作为 tool 消息追加
+        for tc in msg.tool_calls:
+            result = execute_tool(tc)
+            messages.append({
+                &quot;role&quot;: &quot;tool&quot;,
+                &quot;tool_call_id&quot;: tc.id,
+                &quot;content&quot;: json.dumps(result, ensure_ascii=False)
+            })
+
+    return &quot;达到最大轮次，未收敛&quot;
+</code></pre>
+<p><code>max_rounds</code> 是安全阀——工具调用链可能无限循环（一个工具返回空，LLM 换另一个工具重试，又返回空……）。生产环境必须设上限。</p>
+<hr>
+<h2>6. 结构化输出：不用 JSON 解析了</h2>
+<p>OpenAI 2024 年推出了 <code>response_format</code> + <code>strict</code> 模式，但 Function Calling 本身也可以做结构化输出：</p>
+<pre><code class="language-python">tools = [{
+    &quot;type&quot;: &quot;function&quot;,
+    &quot;function&quot;: {
+        &quot;name&quot;: &quot;extract_contract_info&quot;,
+        &quot;description&quot;: &quot;从合同文本中提取关键信息&quot;,
+        &quot;parameters&quot;: {
+            &quot;type&quot;: &quot;object&quot;,
+            &quot;properties&quot;: {
+                &quot;parties&quot;: {
+                    &quot;type&quot;: &quot;array&quot;,
+                    &quot;items&quot;: {
+                        &quot;type&quot;: &quot;object&quot;,
+                        &quot;properties&quot;: {
+                            &quot;name&quot;: {&quot;type&quot;: &quot;string&quot;},
+                            &quot;role&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;enum&quot;: [&quot;甲方&quot;, &quot;乙方&quot;]}
+                        }
+                    }
+                },
+                &quot;amount&quot;: {&quot;type&quot;: &quot;number&quot;, &quot;description&quot;: &quot;合同金额(万元)&quot;},
+                &quot;sign_date&quot;: {&quot;type&quot;: &quot;string&quot;, &quot;description&quot;: &quot;签署日期 YYYY-MM-DD&quot;}
+            },
+            &quot;required&quot;: [&quot;parties&quot;, &quot;amount&quot;]
+        }
+    }
+}]
+
+# 调用时强制使用该函数
+response = client.chat.completions.create(
+    model=&quot;gpt-4o&quot;,
+    messages=[{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: contract_text}],
+    tools=tools,
+    tool_choice={&quot;type&quot;: &quot;function&quot;, &quot;function&quot;: {&quot;name&quot;: &quot;extract_contract_info&quot;}}
+)
+
+info = json.loads(response.choices[0].message.tool_calls[0].function.arguments)
+# info = {&quot;parties&quot;: [...], &quot;amount&quot;: 500, &quot;sign_date&quot;: &quot;2024-03-15&quot;}
+</code></pre>
+<p>实际上就是把 Function Calling 当结构化提取器用。好处是不用单独维护 JSON Schema + prompt，一套 tool definition 搞定。</p>
+<hr>
+<h2>7. 生产环境三个坑</h2>
+<h3>坑 1：工具返回太大，超出 context</h3>
+<pre><code class="language-python">def search_documents(query: str, top_k: int = 20) -&gt; list:
+    results = vector_store.search(query, k=top_k)
+    # 每条结果 2000 字，20 条 = 40000 字 → 轻松超 context
+    return [{&quot;title&quot;: r.title, &quot;content&quot;: r.content[:500]} for r in results]  # 截断
+</code></pre>
+<p>工具函数自己要控制返回大小，不要指望 LLM 帮你裁剪。</p>
+<h3>坑 2：工具超时导致整个请求 hang</h3>
+<pre><code class="language-python">import signal
+
+def execute_with_timeout(func, args, timeout=10):
+    &quot;&quot;&quot;所有工具调用必须带超时&quot;&quot;&quot;
+    # 实际用 concurrent.futures 或 asyncio.wait_for
+    future = executor.submit(func, **args)
+    try:
+        return future.result(timeout=timeout)
+    except TimeoutError:
+        return {&quot;error&quot;: &quot;工具调用超时&quot;, &quot;timeout&quot;: timeout}
+</code></pre>
+<h3>坑 3：LLM 编造参数值</h3>
+<p>LLM 在 required 字段缺失时会&quot;编&quot;一个。防御：在工具函数里校验：</p>
+<pre><code class="language-python">def get_weather(city: str) -&gt; dict:
+    if city not in VALID_CITIES:
+        return {&quot;error&quot;: f&quot;不支持的城市: {city}，支持的城市: {list(VALID_CITIES)[:10]}&quot;}
+    return real_api_call(city)
+</code></pre>
+<p>返回错误信息而不是抛异常——这样 LLM 看到 error 后能自动修正重试。</p>
+<hr>
+<h2>8. 一张图总结</h2>
+<pre><code class="language-mermaid">flowchart TB
+    A[用户Query] --&gt; B{LLM判断}
+    B --&gt;|需要工具| C[返回tool_calls列表]
+    B --&gt;|直接回答| G[返回文本]
+
+    C --&gt; D{依赖关系}
+    D --&gt;|独立| E[并行执行&lt;br/&gt;ThreadPool/AsyncIO]
+    D --&gt;|依赖| F[串行执行&lt;br/&gt;结果→下轮LLM]
+
+    E --&gt; H[收集结果→喂回LLM]
+    F --&gt; H
+    H --&gt; B
+
+    subgraph 防护层
+        I[超时兜底 10s]
+        J[max_rounds ≤ 5]
+        K[返回值截断 &amp;lt; 2000 字]
+        L[参数合法性校验]
+    end
+</code></pre>
+<hr>
+<h2>关键决策清单</h2>
+<ul>
+<li><input disabled="" type="checkbox"> 工具 description 写了返回值结构吗？</li>
+<li><input disabled="" type="checkbox"> 参数 description 写了反例吗（&quot;不要传 xxx&quot;）？</li>
+<li><input disabled="" type="checkbox"> required 字段是否精准（多了 LLM 会编造，少了会漏传）？</li>
+<li><input disabled="" type="checkbox"> 独立调用是否用了并行执行？</li>
+<li><input disabled="" type="checkbox"> 是否设了 max_rounds 防止无限循环？</li>
+<li><input disabled="" type="checkbox"> 工具函数返回是否做了截断（防 context 溢出）？</li>
+<li><input disabled="" type="checkbox"> 工具函数是否有超时兜底？</li>
+<li><input disabled="" type="checkbox"> 工具函数是否校验了参数合法性（返回 error JSON，不抛异常）？</li>
+</ul>
+<p>其中最后四条是区分&quot;能跑&quot;和&quot;能运维&quot;的关键。</p>
+<hr>
+<p><em>下一篇预告：信贷风控方向——「评分卡变量分箱：等频 vs 等距 vs 决策树，选错了代价多大？」</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
