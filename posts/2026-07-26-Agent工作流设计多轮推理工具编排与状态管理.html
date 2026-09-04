@@ -1,0 +1,259 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent工作流设计多轮推理工具编排与状态管理 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-26</div>
+      <h1 class="post-title">Agent工作流设计多轮推理工具编排与状态管理</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>Function Calling 让你调了一个工具，Agent 让你调了一组工具。区别不在&quot;多调了几次&quot;，而在谁来管理调用顺序——是你写死 if-else，还是模型自己迭代决策。</p>
+</blockquote>
+<hr>
+<h2>1. Agent 到底是什么？</h2>
+<p>一句话：<strong>Agent = LLM + 工具 + 循环</strong>。</p>
+<pre><code class="language-python"># Agent 的最小实现：一个 while 循环
+def agent(query: str, tools: list, max_steps: int = 10) -&gt; str:
+    messages = [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: query}]
+    for step in range(max_steps):
+        response = llm.chat(messages, tools=tools)
+        if response.tool_calls is None:
+            return response.content           # 终止
+        for tc in response.tool_calls:
+            result = execute(tc)
+            messages.extend([response, tool_result(tc.id, result)])
+    return &quot;未收敛&quot;
+</code></pre>
+<p>复杂不在于这个循环，而在于循环内的三个工程问题：</p>
+<ol>
+<li><strong>规划</strong>：LLM 怎么拆解复杂任务为多个工具调用？</li>
+<li><strong>编排</strong>：什么时候串行、什么时候并行、什么时候选另一条路重试？</li>
+<li><strong>状态</strong>：多轮之间消息怎么管理？上下文爆了怎么办？</li>
+</ol>
+<hr>
+<h2>2. 规划模式：ReAct vs Plan-Execute</h2>
+<h3>2.1 ReAct（推理 + 行动交替）</h3>
+<p>每轮先思考再行动，适合&quot;走一步看一步&quot;的任务：</p>
+<pre><code>Step 1: Thought: 用户问&quot;A公司最近三个月营收&quot;，我需要先找到A公司的股票代码
+        Action: search_company(name=&quot;A公司&quot;)
+        Observation: {股票代码: &quot;000001&quot;, 名称: &quot;甲公司&quot;}
+
+Step 2: Thought: 拿到了代码 000001，可以用它查财务数据
+        Action: get_financials(stock_code=&quot;000001&quot;, period=&quot;2024Q1-2024Q3&quot;)
+        Observation: {营收: [12.3亿, 14.1亿, 15.6亿]}
+</code></pre>
+<pre><code class="language-python">def react_agent(query: str, tools: list, max_steps: int = 10):
+    messages = [{
+        &quot;role&quot;: &quot;system&quot;,
+        &quot;content&quot;: &quot;&quot;&quot;按以下格式响应：
+        Thought: 当前需要做什么
+        Action: 工具名
+        Action Input: 工具参数 JSON
+        得到结果后，如果信息足够就输出 Final Answer，否则继续 Thought&quot;&quot;&quot;
+    }, {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: query}]
+
+    for _ in range(max_steps):
+        response = llm.chat(messages)
+        if &quot;Final Answer&quot; in response:
+            return response
+        # 解析 Thought → Action → Action Input → 执行 → 追加 Observation
+        action, args = parse_action(response)
+        result = execute(action, args)
+        messages.append(f&quot;Observation: {result}&quot;)
+</code></pre>
+<p>ReAct 适合路径不确定的工具调用——每一步依赖上一步的结果决定下一步。</p>
+<h3>2.2 Plan-Execute（先规划再执行）</h3>
+<pre><code class="language-python">def plan_execute_agent(query: str, tools: list):
+    # Step 1: 生成完整计划
+    plan = llm.chat([{
+        &quot;role&quot;: &quot;system&quot;,
+        &quot;content&quot;: &quot;将用户任务拆解为步骤列表，每步标注依赖。输出 JSON: [{\&quot;step\&quot;:1,\&quot;desc\&quot;:\&quot;...\&quot;,\&quot;tool\&quot;:\&quot;...\&quot;,\&quot;depends_on\&quot;:[]}]&quot;
+    }, {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: query}])
+
+    steps = json.loads(plan)
+
+    # Step 2: 按依赖拓扑排序执行
+    results = {}
+    for step in sorted(steps, key=lambda s: max([0] + [s2[&quot;step&quot;] for s2 in steps if s2[&quot;step&quot;] in s[&quot;depends_on&quot;]])):
+        args = {k: results.get(v, v) for k, v in step[&quot;inputs&quot;].items()}  # 依赖结果注入
+        results[step[&quot;step&quot;]] = execute(step[&quot;tool&quot;], args)
+
+    # Step 3: LLM 汇总
+    return llm.chat([{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;基于以下结果回答: {results}\n问题: {query}&quot;}])
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>模式</th>
+<th>适用场景</th>
+<th>优点</th>
+<th>缺点</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>ReAct</td>
+<td>路径不确定、需要中间结果决策</td>
+<td>灵活、能自适应调整</td>
+<td>轮次多、延迟高</td>
+</tr>
+<tr>
+<td>Plan-Execute</td>
+<td>步骤明确、可并行</td>
+<td>快、可做批量优化</td>
+<td>遇到意外无法变通</td>
+</tr>
+</tbody></table>
+<p>生产环境建议两套都备：默认走 Plan-Execute（快），plan 执行到一半发现结果不符合预期时兜底切 ReAct（灵）。</p>
+<hr>
+<h2>3. 工具编排：什么时候并行、什么时候串行</h2>
+<p>上篇 Function Calling 讲了并行调用。Agent 场景更复杂——你不知道哪些调用有依赖。</p>
+<h3>依赖感知编排</h3>
+<pre><code class="language-python">def orchestrate(tool_calls: list) -&gt; list:
+    &quot;&quot;&quot;
+    根据参数依赖关系判断串行/并行
+    规则：参数值中引用了其他函数输出 → 必须等那个函数先执行
+    &quot;&quot;&quot;
+    results = {}
+    executed = set()
+    pending = list(tool_calls)
+
+    while pending:
+        # 找出一批没有依赖的（可并行执行）
+        batch = [tc for tc in pending
+                 if all(ref not in [t[&quot;name&quot;] for t in pending]
+                        for ref in extract_dependencies(tc[&quot;args&quot;]))]
+
+        if not batch:
+            # 死锁检测：取第一个串行执行破局
+            batch = [pending[0]]
+
+        # 并行执行这一批
+        batch_results = parallel_execute(batch, results)
+        results.update(batch_results)
+        executed.update(tc[&quot;name&quot;] for tc in batch)
+        pending = [tc for tc in pending if tc[&quot;name&quot;] not in executed]
+
+    return results
+</code></pre>
+<p><strong>核心直觉</strong>：没有参数依赖的调用，一律并行。有依赖的自然串行。不需要人工标注哪个函数依赖哪个——从参数引用关系自动推导。</p>
+<hr>
+<h2>4. 状态管理：context 是 Agent 的瓶颈</h2>
+<h3>4.1 上下文窗口管理</h3>
+<p>一个 5 轮 ReAct Agent，messages 可能的膨胀：</p>
+<pre><code>轮 1: system + user (500 token) → assistant + tool_call (300) → tool_result (2000)
+轮 2: [所有历史] + assistant (300) + tool_result (1500)
+轮 3: [所有历史] + assistant (100) → Final Answer
+总计: 约 6000 token，每多一轮加 1500-2500
+</code></pre>
+<p>超过 context 窗口的后果是灾难性的——LLM 丢失早期消息，行为退化。</p>
+<p><strong>三条实用策略</strong>：</p>
+<pre><code class="language-python">def manage_context(messages: list, max_tokens: int = 8000) -&gt; list:
+    total = sum(estimate_tokens(m) for m in messages)
+
+    if total &lt;= max_tokens:
+        return messages
+
+    # 策略 1：压缩 tool_result（只保留摘要）
+    for msg in messages:
+        if msg[&quot;role&quot;] == &quot;tool&quot; and estimate_tokens(msg) &gt; 1000:
+            msg[&quot;content&quot;] = summarize(msg[&quot;content&quot;])
+
+    # 策略 2：裁剪中间轮（保留首尾）
+    if estimate_tokens_sum(messages) &gt; max_tokens:
+        system = messages[0]
+        recent = messages[-6:]  # 保留最后 3 轮（user + assistant + tool 各 2 条）
+        summary = llm.chat([{
+            &quot;role&quot;: &quot;user&quot;,
+            &quot;content&quot;: f&quot;用一段话概括以下对话的关键发现: {serialize(messages[1:-6])}&quot;
+        }])
+        messages = [system, {&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: f&quot;历史摘要: {summary}&quot;}] + recent
+
+    return messages
+</code></pre>
+<h3>4.2 状态持久化</h3>
+<p>Agent 任务可能跨多次 HTTP 请求（中间需要人工确认）。状态必须持久化到外部存储：</p>
+<pre><code class="language-python">import pickle, redis
+
+class AgentState:
+    def __init__(self, session_id: str):
+        self.session_id = session_id
+        self.messages: list = []
+        self.plan: list = []          # Plan-Execute 的计划步骤
+        self.completed_steps: set = set()
+        self.intermediate_results: dict = {}
+
+    def save(self):
+        redis.setex(f&quot;agent:{self.session_id}&quot;, 3600,
+                     pickle.dumps(self))
+
+    @classmethod
+    def load(cls, session_id: str):
+        data = redis.get(f&quot;agent:{session_id}&quot;)
+        return pickle.loads(data) if data else cls(session_id)
+</code></pre>
+<hr>
+<h2>5. 生产级 Agent 的完整骨架</h2>
+<pre><code class="language-python">class ProductionAgent:
+    def __init__(self, llm, tools, max_steps=10, max_context=8000):
+        self.llm = llm
+        self.tools = tools
+        self.max_steps = max_steps
+        self.max_context = max_context
+
+    def run(self, query: str, session_id: str = None) -&gt; str:
+        state = AgentState.load(session_id) or AgentState(session_id or uuid4())
+        state.messages.append({&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: query})
+
+        for _ in range(self.max_steps):
+            state.messages = manage_context(state.messages, self.max_context)   # 上下文裁剪
+            response = self.llm.chat(state.messages, tools=self.tools)
+
+            if response.tool_calls is None:
+                state.save()
+                return response.content
+
+            batch = orchestrate(response.tool_calls)    # 依赖感知编排
+            results = parallel_execute(batch)
+            state.intermediate_results.update(results)
+            state.messages.extend([{&quot;role&quot;: &quot;tool&quot;, &quot;content&quot;: r} for r in results])
+            state.save()
+
+        return &quot;达到最大步数，任务未完成&quot;
+</code></pre>
+<hr>
+<h2>6. 关键决策清单</h2>
+<ul>
+<li><input disabled="" type="checkbox"> 是否同时实现了 ReAct 和 Plan-Execute 两套规划模式？Plan 优先走不通切 ReAct？</li>
+<li><input disabled="" type="checkbox"> 工具编排是否根据参数依赖自动判定串行/并行（而非人工标注）？</li>
+<li><input disabled="" type="checkbox"> 是否实现了上下文窗口管理（tool_result 截断 + 中间轮摘要）？</li>
+<li><input disabled="" type="checkbox"> Agent 状态是否持久化到外部存储（支持跨请求会话）？</li>
+<li><input disabled="" type="checkbox"> 是否设置了 max_steps 安全阀？</li>
+<li><input disabled="" type="checkbox"> 每个工具调用是否有超时兜底？</li>
+</ul>
+<hr>
+<p><em>下一篇预告：信贷风控方向——「特征工程实战：从原始数据到模型入模的完整链路」</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
