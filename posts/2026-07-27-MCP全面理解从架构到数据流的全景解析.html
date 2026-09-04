@@ -1,0 +1,682 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MCP全面理解从架构到数据流的全景解析 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-27</div>
+      <h1 class="post-title">MCP全面理解从架构到数据流的全景解析</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>MCP 不是&quot;又一个 API 协议&quot;，它是大模型与外部世界之间的<strong>标准插座</strong>——有了它，换个模型就像换个电器，插头不变，照常用。</p>
+</blockquote>
+<hr>
+<h2>1. MCP 是什么？</h2>
+<p><strong>MCP（Model Context Protocol，模型上下文协议）</strong> 是大模型（LLM）与外部工具/数据源之间的标准化通信协议。由 Anthropic 提出，现在已是 AI 工具生态的事实标准。</p>
+<h3>没有 MCP vs 有 MCP</h3>
+<pre><code class="language-mermaid">graph LR
+    subgraph before[&quot;❌ 没有 MCP：M×N 对等适配&quot;]
+        direction LR
+        A((模型A)) --&gt;|&quot;定制适配①&quot;| L[查日志]
+        B((模型B)) --&gt;|&quot;定制适配②&quot;| L
+        A --&gt;|&quot;定制适配③&quot;| D[查数据库]
+        B --&gt;|&quot;定制适配④&quot;| D
+    end
+
+    subgraph after[&quot;✅ 有了 MCP：M+N 统一对接&quot;]
+        direction LR
+        C((任何模型)) --&gt;|&quot;MCP 标准协议&quot;| HUB{{MCP 协议层}}
+        HUB --&gt; L2[查日志]
+        HUB --&gt; D2[查数据库]
+        HUB --&gt; K2[操作K8S]
+        HUB --&gt; G2[读写Git]
+    end
+</code></pre>
+<p><strong>说白了就是</strong>：USB-C 出来之前，每个手机有自己的充电口——苹果用 Lightning、安卓有的用 Micro-USB、有的用 USB-C。你出门得带三根线。MCP 就是 AI 世界的 USB-C：<strong>一套标准协议，所有模型和所有工具都能对接</strong>。</p>
+<hr>
+<h2>2. MCP 干什么？</h2>
+<p>MCP 让大模型能<strong>安全、标准化地</strong>做三类事：</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>干什么</th>
+<th>举例</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>Resources（资源）</strong></td>
+<td>暴露数据/文件给模型读</td>
+<td>让模型读取你的项目代码、配置文件、数据库 schema</td>
+</tr>
+<tr>
+<td><strong>Tools（工具）</strong></td>
+<td>让模型调用外部功能</td>
+<td>查日志、搜知识库、操作 K8S、创建需求</td>
+</tr>
+<tr>
+<td><strong>Prompts（提示模板）</strong></td>
+<td>预定义交互模板</td>
+<td>&quot;帮我审查这段代码的安全性&quot;——模板化复用</td>
+</tr>
+</tbody></table>
+<p><strong>最常用的场景就是 Tools</strong>：模型说&quot;我要查一下日志&quot;，你的本地客户端帮它调了，把结果喂回去，模型据此生成最终回答。</p>
+<hr>
+<h2>3. 系统架构全景图</h2>
+<p>一个完整的 MCP 体系包含四层，用圆形实体 + 箭头的流转图来展示：</p>
+<pre><code class="language-mermaid">graph TB
+    subgraph cloud[&quot;☁️ 云端 GPU 集群&quot;]
+        LLM(((&quot;大模型 LLM&quot;)))
+    end
+
+    subgraph local[&quot;💻 你的电脑&quot;]
+        IDE[&quot;AI 客户端 (桌面 IDE)&quot;]
+        MC(((&quot;MCP Client&quot;)))
+        BS(((&quot;本地 MCP Server\n浏览器/文件&quot;)))
+        IDE --- MC
+    end
+
+    subgraph remote[&quot;🔧 远程 MCP Server 集群&quot;]
+        LOG_SRV(((&quot;日志查询\nMCP Server&quot;)))
+        K8S_SRV(((&quot;容器管理\nMCP Server&quot;)))
+        GIT_SRV(((&quot;代码仓库\nMCP Server&quot;)))
+        DB_SRV(((&quot;数据库\nMCP Server&quot;)))
+    end
+
+    subgraph internal[&quot;🏢 企业内部系统&quot;]
+        LOG[(日志平台)]
+        K8S[(K8S 集群)]
+        GIT[(Git 仓库)]
+        DB[(数据库)]
+    end
+
+    LLM &lt;--&gt;|&quot;HTTPS SSE\nfunction_call ↔ 工具结果&quot;| IDE
+    MC --&gt;|&quot;stdio\n管道通信&quot;| BS
+    MC --&gt;|&quot;SSE 长连&quot;| LOG_SRV
+    MC --&gt;|&quot;SSE 长连&quot;| K8S_SRV
+    MC --&gt;|&quot;SSE 长连&quot;| GIT_SRV
+    MC --&gt;|&quot;SSE 长连&quot;| DB_SRV
+    LOG_SRV --&gt;|&quot;HTTPS\n内部API&quot;| LOG
+    K8S_SRV --&gt;|&quot;HTTPS\n内部API&quot;| K8S
+    GIT_SRV --&gt;|&quot;HTTPS\n内部API&quot;| GIT
+    DB_SRV --&gt;|&quot;JDBC/TCP\nSQL&quot;| DB
+
+    style LLM fill:#FF6B6B,stroke:#333,color:#fff
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style BS fill:#95E1D3,stroke:#333,color:#333
+    style LOG_SRV fill:#FFE66D,stroke:#333,color:#333
+    style K8S_SRV fill:#FFE66D,stroke:#333,color:#333
+    style GIT_SRV fill:#FFE66D,stroke:#333,color:#333
+    style DB_SRV fill:#FFE66D,stroke:#333,color:#333
+    style LOG fill:#A8E6CF,stroke:#333,color:#333
+    style K8S fill:#A8E6CF,stroke:#333,color:#333
+    style GIT fill:#A8E6CF,stroke:#333,color:#333
+    style DB fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<p><strong>四层角色速查</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>层级</th>
+<th>是什么</th>
+<th>跑在哪儿</th>
+<th>一句话</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>大模型</strong></td>
+<td>大脑</td>
+<td>云端 GPU</td>
+<td>理解你的意图，输出 function_call 指令，自己不调任何外部系统</td>
+</tr>
+<tr>
+<td><strong>MCP Client</strong></td>
+<td>手脚</td>
+<td>你的电脑</td>
+<td>接收指令 → 找到对应 Server → 转发 → 拿到结果 → 喂回模型</td>
+</tr>
+<tr>
+<td><strong>MCP Server</strong></td>
+<td>工具人</td>
+<td>远端机房 / 你本机</td>
+<td>收 JSON-RPC，调内部 API，返回结果</td>
+</tr>
+<tr>
+<td><strong>企业系统</strong></td>
+<td>数据源</td>
+<td>企业内网</td>
+<td>日志、数据库、K8S——MCP Server 帮你取出来的那口井</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>4. Function Calling 是什么？</h2>
+<p>在讲数据流之前，必须先搞清楚一个关键概念：<strong>Function Calling</strong>。</p>
+<h3>4.1 一句话定义</h3>
+<p><strong>Function Calling 是大模型的一项能力——它能&quot;说出&quot;自己要调哪个函数、传什么参数</strong>，但它自己不执行。真正执行的是你本地的代码。</p>
+<h3>4.2 用餐厅点菜来理解</h3>
+<pre><code>你去餐厅：
+
+你：  &quot;给我来一份宫保鸡丁，微辣&quot;       ← 这是你的自然语言问题
+厨师：看了一眼菜单，写了个单子：         ← 这是 Function Calling
+      ┌─────────────────────┐
+      │ 菜名: 宫保鸡丁       │
+      │ 辣度: 微辣          │
+      │ 数量: 1份           │
+      └─────────────────────┘
+      然后把单子递给服务员            ← 模型把 function_call 返回给客户端
+
+服务员：拿着单子去厨房，厨师真正炒菜   ← 这是 MCP Client 调 MCP Server
+
+炒好了，服务员端回来给你            ← 结果回传
+</code></pre>
+<p><strong>Function Calling 就是&quot;厨师开单子&quot;这一步——模型只负责决策&quot;该调哪个函数、传什么参数&quot;，真正炒菜（执行）是后面的事。</strong></p>
+<h3>4.3 实际代码长什么样</h3>
+<p>大模型返回的不是自然语言，而是一个结构化的 JSON：</p>
+<pre><code class="language-json">{
+  &quot;tool_calls&quot;: [{
+    &quot;function&quot;: {
+      &quot;name&quot;: &quot;SearchLog&quot;,
+      &quot;arguments&quot;: {
+        &quot;Query&quot;: &quot;level:ERROR&quot;,
+        &quot;From&quot;: 1753574400000,
+        &quot;To&quot;: 1753660799000
+      }
+    }
+  }]
+}
+</code></pre>
+<p>关键：<strong>模型只输出这个 JSON，不执行它</strong>。谁执行？——你的客户端拿这个 JSON，去调 MCP Server。</p>
+<h3>4.4 Function Calling 和 MCP 的关系</h3>
+<pre><code class="language-mermaid">graph LR
+    USER((你)) --&gt;|&quot;帮我查日志&quot;| LLM(((&quot;大模型&quot;)))
+    LLM --&gt;|&quot;Function Calling\n输出 function_call JSON&quot;| MC(((&quot;MCP Client&quot;)))
+    MC --&gt;|&quot;MCP 协议\nJSON-RPC&quot;| SRV(((&quot;MCP Server&quot;)))
+    SRV --&gt;|&quot;内部 API&quot;| DB[(日志平台)]
+
+    style LLM fill:#FF6B6B,stroke:#333,color:#fff
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style SRV fill:#FFE66D,stroke:#333,color:#333
+    style DB fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>Function Calling</th>
+<th>MCP</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>是什么</td>
+<td>大模型的一项<strong>能力</strong>（能输出函数调用指令）</td>
+<td>一套<strong>协议标准</strong>（定义了 Client ↔ Server 怎么通信）</td>
+</tr>
+<tr>
+<td>管什么</td>
+<td>&quot;模型输出 function_call JSON&quot;</td>
+<td>&quot;从发现工具到调用工具到回传结果的全链路&quot;</td>
+</tr>
+<tr>
+<td>谁实现</td>
+<td>模型提供商（OpenAI/Anthropic/DeepSeek）</td>
+<td>工具提供方（日志平台、K8S、DB 团队各自写 Server）</td>
+</tr>
+<tr>
+<td>谁执行</td>
+<td><strong>不执行</strong>，只输出指令</td>
+<td><strong>真正执行</strong>，调内部 API 拿结果</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是</strong>：Function Calling 是&quot;大脑说要干什么&quot;，MCP 是&quot;手脚去把它干了&quot;。大脑只动嘴，手脚才动手。</p>
+<hr>
+<h2>5. 一次完整调用的 HTTP 数据流（8 跳）</h2>
+<pre><code class="language-mermaid">sequenceDiagram
+    participant 你 as 🧑 你
+    participant Client as 💻 AI客户端&lt;br/&gt;含 MCP Client
+    participant LLM as ☁️ 大模型&lt;br/&gt;云端 GPU
+    participant MCPSrv as 🔧 MCP Server (远程)
+    participant Internal as 🏢 企业内部系统
+
+    Note over 你,Internal: === 第 1 轮：模型决定调哪个工具 ===
+
+    你-&gt;&gt;Client: 打字提问
+    Client-&gt;&gt;LLM: ① HTTPS POST /chat/completions&lt;br/&gt;含 messages + tools 清单
+    Note over LLM: 推理：需要调 SearchLog
+    LLM--&gt;&gt;Client: ② SSE stream: function_call&lt;br/&gt;name=&quot;SearchLog&quot; args={...}
+    Note over Client: MCP Client 解析 function_call
+    Client-&gt;&gt;MCPSrv: ③ HTTPS POST /sse&lt;br/&gt;JSON-RPC tools/call
+    Note over MCPSrv: 鉴权 → 校验 → 调内部API
+    MCPSrv-&gt;&gt;Internal: ④ HTTPS POST 内部API
+    Internal--&gt;&gt;MCPSrv: ⑤ 返回原始数据
+    Note over MCPSrv: 包装成 MCP 标准格式
+    MCPSrv--&gt;&gt;Client: ⑥ SSE Push 结果
+
+    Note over Client: MCP Client 拿到工具结果
+
+    Note over 你,Internal: === 第 2 轮：模型生成最终回答 ===
+
+    Client-&gt;&gt;LLM: ⑦ HTTPS POST /chat/completions&lt;br/&gt;含 tool result
+    Note over LLM: 根据结果生成回答
+    LLM--&gt;&gt;Client: ⑧ SSE stream: 最终文本
+    Client--&gt;&gt;你: ⑨ 渲染到聊天框
+</code></pre>
+<p><strong>每一跳都是真实的 HTTPS 请求</strong>，一次对话 = 4 次独立的 HTTPS 往返：</p>
+<table>
+<thead>
+<tr>
+<th>跳</th>
+<th>方向</th>
+<th>干什么</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>①→②</td>
+<td>客户端 ↔ 大模型</td>
+<td>把你的问题 + 可用工具清单发给模型</td>
+</tr>
+<tr>
+<td>③→⑥</td>
+<td>客户端 → MCP Server → 内部系统 → MCP Server → 客户端</td>
+<td>一整条工具调用链路</td>
+</tr>
+<tr>
+<td>⑦→⑧</td>
+<td>客户端 ↔ 大模型</td>
+<td>把工具结果喂给模型，生成最终文本</td>
+</tr>
+<tr>
+<td>⑨</td>
+<td>客户端 → 你</td>
+<td>渲染到聊天框</td>
+</tr>
+</tbody></table>
+<h3>流转路径总结</h3>
+<pre><code class="language-mermaid">graph LR
+    LLM(((&quot;大模型\n云端 GPU&quot;))) --&gt;|&quot;① 返回 function_call&quot;| MC(((&quot;MCP Client\n你的电脑&quot;)))
+    MC --&gt;|&quot;② 转发 JSON-RPC&quot;| SRV(((&quot;MCP Server\n远程服务&quot;)))
+    SRV --&gt;|&quot;③ 调内部 API&quot;| SYS((&quot;企业系统&quot;))
+    SYS --&gt;|&quot;④ 返回数据&quot;| SRV
+    SRV --&gt;|&quot;⑤ 包装回传&quot;| MC
+    MC --&gt;|&quot;⑥ 喂回模型&quot;| LLM
+    LLM --&gt;|&quot;⑦ 生成回答&quot;| MC
+
+    style LLM fill:#FF6B6B,stroke:#333,color:#fff
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style SRV fill:#FFE66D,stroke:#333,color:#333
+    style SYS fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<hr>
+<h2>6. MCP Client 详细拆解</h2>
+<h3>6.1 它在哪里？</h3>
+<p>MCP Client 是你桌面 AI 应用（如 VS Code 插件、独立 IDE）<strong>内置的一个模块</strong>，不需要你单独安装。</p>
+<h3>6.2 它用什么语言写的？</h3>
+<p>通常是 <strong>TypeScript</strong>，因为主流 AI 编程工具基于 <strong>VS Code / Electron</strong> 生态（Chromium 渲染 + Node.js 后端）。</p>
+<h3>6.3 它干四件事</h3>
+<pre><code class="language-mermaid">graph TB
+    subgraph mcp_client[&quot;MCP Client 工作循环&quot;]
+        direction LR
+        S1((&quot;① 工具发现&lt;br/&gt;tools/list&quot;))
+        S2((&quot;② 上报模型&lt;br/&gt;告知工具清单&quot;))
+        S3((&quot;③ 转发调用&lt;br/&gt;JSON-RPC&quot;))
+        S4((&quot;④ 回传结果&lt;br/&gt;喂回模型&quot;))
+        S1 --&gt; S2 --&gt; S3 --&gt; S4
+    end
+
+    style S1 fill:#FF6B6B,stroke:#333,color:#fff
+    style S2 fill:#FFE66D,stroke:#333,color:#333
+    style S3 fill:#4ECDC4,stroke:#333,color:#fff
+    style S4 fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>步骤</th>
+<th>干什么</th>
+<th>具体动作</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>① 发现</td>
+<td>启动时问每个 Server &quot;你能干啥？&quot;</td>
+<td><code>tools/list</code> → <code>{SearchLog, listPods, getFile...}</code></td>
+</tr>
+<tr>
+<td>② 上报</td>
+<td>把工具清单发给大模型</td>
+<td>&quot;告诉模型：你能调这些工具，每个的参数是...&quot;</td>
+</tr>
+<tr>
+<td>③ 转发</td>
+<td>模型说&quot;调 SearchLog&quot; → 找到对应 Server → 发 JSON-RPC</td>
+<td>包装参数 → <code>{&quot;jsonrpc&quot;:&quot;2.0&quot;, &quot;method&quot;:&quot;tools/call&quot;, ...}</code></td>
+</tr>
+<tr>
+<td>④ 回传</td>
+<td>Server 返回结果 → 塞进下一轮对话 → 发给模型</td>
+<td><code>{role:&quot;tool&quot;, content:&quot;共N条ERROR...&quot;}</code> → 模型 → 最终回答</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是</strong>：MCP Client 是大模型的&quot;快递员&quot;——大模型说&quot;去 X 店取货&quot;，Client 就去 X 店拿、再送到大模型面前。它自己不加工货物，只负责运。</p>
+<hr>
+<h2>7. 为什么必须经过你的电脑？</h2>
+<pre><code class="language-mermaid">graph TB
+    LLM(((&quot;大模型\n云端 GPU&quot;)))
+    PC(((&quot;你的电脑\n有 VPN/OA 凭证&quot;)))
+    SYS1((&quot;日志平台&quot;))
+    SYS2((&quot;K8S 集群&quot;))
+    SYS3((&quot;数据库&quot;))
+
+    LLM -.-&gt;|&quot;❌ 网络隔离\n连不上&quot;| SYS1
+    LLM -.-&gt;|&quot;❌ 网络隔离\n连不上&quot;| SYS2
+    LLM -.-&gt;|&quot;❌ 网络隔离\n连不上&quot;| SYS3
+    LLM --&gt;|&quot;✅ HTTPS&quot;| PC
+    PC --&gt;|&quot;✅ 内网可达&quot;| SYS1
+    PC --&gt;|&quot;✅ 内网可达&quot;| SYS2
+    PC --&gt;|&quot;✅ 内网可达&quot;| SYS3
+
+    style LLM fill:#FF6B6B,stroke:#333,color:#fff
+    style PC fill:#4ECDC4,stroke:#333,color:#fff
+    style SYS1 fill:#A8E6CF,stroke:#333,color:#333
+    style SYS2 fill:#A8E6CF,stroke:#333,color:#333
+    style SYS3 fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<p><strong>两条根本原因</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>原因</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>网络隔离</strong></td>
+<td>大模型跑在独立的 GPU 集群，与企业内网是隔离的。你的电脑有登录凭证和网络权限</td>
+</tr>
+<tr>
+<td><strong>文件系统</strong></td>
+<td>大模型看不到你本机的代码和文件，只有你本机才能读本地项目文件</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是</strong>：大模型是&quot;远程大脑&quot;，你的电脑是&quot;本地手脚&quot;。脑子再聪明，没有手脚也拿不到桌上的东西。</p>
+<hr>
+<h2>8. 通信协议：MCP 到底用什么传数据？</h2>
+<p>MCP 协议本质是 <strong>JSON-RPC 2.0</strong>，包在两种传输方式里：</p>
+<h3>8.1 两种传输方式</h3>
+<pre><code class="language-mermaid">graph LR
+    MC(((&quot;MCP Client\n你的电脑&quot;)))
+    LOCAL(((&quot;本地 MCP Server\nstdio 管道&quot;)))
+    REMOTE(((&quot;远程 MCP Server\nSSE 长连接&quot;)))
+
+    MC --&gt;|&quot;stdio\n子进程 stdin/stdout&quot;| LOCAL
+    MC --&gt;|&quot;SSE\nHTTP 长连接&quot;| REMOTE
+
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style LOCAL fill:#95E1D3,stroke:#333,color:#333
+    style REMOTE fill:#FFE66D,stroke:#333,color:#333
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>方式</th>
+<th>场景</th>
+<th>怎么通信</th>
+<th>例子</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>stdio</strong></td>
+<td>MCP Server 在你本机</td>
+<td><code>child_process.spawn()</code> 起子进程<br/>stdin/stdout 传 JSON</td>
+<td>浏览器自动化、本地文件操作</td>
+</tr>
+<tr>
+<td><strong>SSE</strong> (Server-Sent Events)</td>
+<td>MCP Server 在远端</td>
+<td>HTTP 长连接<br/>Client→Server 用 POST<br/>Server→Client 用 SSE Push</td>
+<td>日志查询、K8S 管理、数据库操作</td>
+</tr>
+</tbody></table>
+<h3>8.2 stdio 模式（本地管道通信）</h3>
+<pre><code class="language-mermaid">sequenceDiagram
+    participant MC as MCP Client (Node 进程)
+    participant SRV as MCP Server (子进程)
+
+    MC-&gt;&gt;SRV: spawn(&quot;npx&quot;, [&quot;@browser/server&quot;])&lt;br/&gt;启动子进程
+    MC-&gt;&gt;SRV: stdin: {&quot;jsonrpc&quot;:&quot;2.0&quot;,&lt;br/&gt;&quot;method&quot;:&quot;tools/call&quot;, ...}
+    SRV--&gt;&gt;MC: stdout: {&quot;jsonrpc&quot;:&quot;2.0&quot;,&lt;br/&gt;&quot;result&quot;:{screenshot:&quot;base64...&quot;}}
+</code></pre>
+<p><strong>特点</strong>：不走网络，纯管道通信，零延迟，数据不离开本机。</p>
+<h3>8.3 SSE 模式（远程 HTTP 通信）</h3>
+<pre><code class="language-mermaid">sequenceDiagram
+    participant MC as MCP Client
+    participant SRV as 远程 MCP Server
+
+    MC-&gt;&gt;SRV: POST /sse 建立长连接
+    SRV--&gt;&gt;MC: SSE: endpoint event (告知消息端点)
+    MC-&gt;&gt;SRV: POST /message {&quot;jsonrpc&quot;:&quot;2.0&quot;, &quot;method&quot;:&quot;tools/call&quot;, ...}
+    SRV--&gt;&gt;MC: SSE: message event {&quot;jsonrpc&quot;:&quot;2.0&quot;, &quot;result&quot;:{...}}
+</code></pre>
+<p><strong>特点</strong>：走 HTTP，适合跨网络。Client 维护一条 SSE 长连接收推送，POST 请求发调用。</p>
+<h3>8.4 与 REST API 的本质区别</h3>
+<table>
+<thead>
+<tr>
+<th></th>
+<th>REST API</th>
+<th>MCP</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>调用方式</td>
+<td>你写死 &quot;调 /api/logs/search&quot;</td>
+<td>模型动态决定&quot;我要调 SearchLog&quot;</td>
+</tr>
+<tr>
+<td>工具发现</td>
+<td>无——你要预先知道有哪些端点</td>
+<td>有 <code>tools/list</code> ——启动时自动发现</td>
+</tr>
+<tr>
+<td>谁决策</td>
+<td>你（程序）决定什么时候调什么</td>
+<td>模型根据上下文推理决定</td>
+</tr>
+<tr>
+<td>返回值</td>
+<td>直接给调用方</td>
+<td>先回到 Client → 再喂给模型 → 模型据此生成回答</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是</strong>：REST API 是你写代码去调，MCP 是让大模型替你做&quot;我该调哪个工具&quot;的决策。</p>
+<hr>
+<h2>9. MCP vs Function Calling（总结对比）</h2>
+<pre><code class="language-mermaid">graph LR
+    subgraph fc[&quot;Function Calling：模型层面的能力&quot;]
+        FC1((&quot;模型理解意图&quot;))
+        FC2((&quot;模型输出&lt;br/&gt;function_call JSON&quot;))
+        FC1 --&gt; FC2
+    end
+
+    subgraph mcp[&quot;MCP：通信层面的协议&quot;]
+        M1((&quot;tools/list&lt;br/&gt;工具发现&quot;))
+        M2((&quot;JSON-RPC&lt;br/&gt;调用转发&quot;))
+        M3((&quot;结果回传&lt;br/&gt;喂回模型&quot;))
+        M1 --&gt; M2 --&gt; M3
+    end
+
+    FC2 -.-&gt;|&quot;function_call 是 MCP 的输入&quot;| M2
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>Function Calling</th>
+<th>MCP</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>层面</strong></td>
+<td>模型能力层</td>
+<td>通信协议层</td>
+</tr>
+<tr>
+<td><strong>谁实现</strong></td>
+<td>模型厂商（OpenAI/Anthropic/DeepSeek）</td>
+<td>工具平台团队（日志/K8S/DB 各写各的 Server）</td>
+</tr>
+<tr>
+<td><strong>产出</strong></td>
+<td>一个 function_call JSON</td>
+<td>一个完整的工具调用生命周期</td>
+</tr>
+<tr>
+<td><strong>类比</strong></td>
+<td>&quot;厨师开菜单&quot;</td>
+<td>&quot;服务员接单 → 厨房炒菜 → 上菜&quot;</td>
+</tr>
+<tr>
+<td><strong>能独立工作吗</strong></td>
+<td>不能——光开单子没人炒菜</td>
+<td>不能——没有 function_call 不知道要调哪个工具</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是</strong>：Function Calling 是&quot;大脑说要干什么&quot;，MCP 是&quot;手脚去把它干了&quot;。两者配合：大脑动嘴开单子（function_call），手脚按单子跑腿执行（MCP）。</p>
+<hr>
+<h2>10. 一个 MCP Server 内部长什么样？</h2>
+<pre><code class="language-mermaid">graph TB
+    subgraph srv[&quot;MCP Server (如日志查询服务)&quot;]
+        direction TB
+        AUTH((&quot;鉴权层&quot;))
+        ROUTE((&quot;路由层&quot;))
+        ADAPT((&quot;适配层&quot;))
+        AUTH --&gt;|&quot;身份验证通过&quot;| ROUTE
+        ROUTE --&gt;|&quot;匹配到 tools/call&quot;| ADAPT
+        ADAPT --&gt;|&quot;调用内部 API&quot;| LOGAPI((&quot;日志平台 API&quot;))
+    end
+
+    EXT((&quot;外部请求&lt;br/&gt;JSON-RPC&quot;)) --&gt; AUTH
+    ADAPT --&gt;|&quot;返回 MCP 标准格式&quot;| EXT
+
+    style AUTH fill:#FF6B6B,stroke:#333,color:#fff
+    style ROUTE fill:#FFE66D,stroke:#333,color:#333
+    style ADAPT fill:#A8E6CF,stroke:#333,color:#333
+    style LOGAPI fill:#95E1D3,stroke:#333,color:#333
+</code></pre>
+<table>
+<thead>
+<tr>
+<th>层</th>
+<th>职责</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>鉴权层</strong></td>
+<td>提取 token → 验证身份 → 权限校验</td>
+</tr>
+<tr>
+<td><strong>路由层</strong></td>
+<td>解析 <code>method: tools/call</code> → 匹配到具体工具函数</td>
+</tr>
+<tr>
+<td><strong>适配层</strong></td>
+<td>调内部 API → 格式转换 → 错误处理 → 包装成 MCP 返回格式</td>
+</tr>
+</tbody></table>
+<p>注册的工具示例：</p>
+<ul>
+<li><code>SearchLog(query, from, to)</code> → 查日志</li>
+<li><code>GetTopicInfo(name)</code> → 查日志主题</li>
+<li><code>TextToSearchQuery(naturalLanguage)</code> → 自然语言转查询语法</li>
+</ul>
+<hr>
+<h2>11. 三种典型部署拓扑</h2>
+<h3>拓扑 A：全本地</h3>
+<pre><code class="language-mermaid">graph LR
+    MC(((&quot;MCP Client&quot;))) --&gt;|&quot;stdio&quot;| SRV(((&quot;本地 MCP Server\n浏览器/文件&quot;)))
+    SRV --&gt;|&quot;操作&quot;| BR[(浏览器)]
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style SRV fill:#95E1D3,stroke:#333,color:#333
+</code></pre>
+<p><strong>场景</strong>：浏览器自动化截图、本地文件批量处理。</p>
+<h3>拓扑 B：本地 + 远程混合（最常见）</h3>
+<pre><code class="language-mermaid">graph TB
+    MC(((&quot;MCP Client\n你的电脑&quot;)))
+    MC --&gt;|&quot;stdio&quot;| LOCAL(((&quot;本地 Server\n浏览器&quot;)))
+    MC --&gt;|&quot;SSE&quot;| R1(((&quot;日志\nServer&quot;)))
+    MC --&gt;|&quot;SSE&quot;| R2(((&quot;K8S\nServer&quot;)))
+    MC --&gt;|&quot;SSE&quot;| R3(((&quot;Git\nServer&quot;)))
+    R1 --&gt;|&quot;API&quot;| L1[(日志平台)]
+    R2 --&gt;|&quot;API&quot;| L2[(K8S 集群)]
+    R3 --&gt;|&quot;API&quot;| L3[(Git 仓库)]
+
+    style MC fill:#4ECDC4,stroke:#333,color:#fff
+    style LOCAL fill:#95E1D3,stroke:#333,color:#333
+    style R1 fill:#FFE66D,stroke:#333,color:#333
+    style R2 fill:#FFE66D,stroke:#333,color:#333
+    style R3 fill:#FFE66D,stroke:#333,color:#333
+    style L1 fill:#A8E6CF,stroke:#333,color:#333
+    style L2 fill:#A8E6CF,stroke:#333,color:#333
+    style L3 fill:#A8E6CF,stroke:#333,color:#333
+</code></pre>
+<p><strong>场景</strong>：日常编程助手——既读本地代码，又查线上日志、看 Pod 状态。</p>
+<h3>拓扑 C：纯云端（Agent 模式）</h3>
+<pre><code class="language-mermaid">graph LR
+    AGENT(((&quot;云端 Agent\n含 MCP Client&quot;))) --&gt;|&quot;SSE&quot;| R1(((&quot;日志 Server&quot;)))
+    AGENT --&gt;|&quot;SSE&quot;| R2(((&quot;K8S Server&quot;)))
+    R1 --&gt; L1[(日志平台)]
+    R2 --&gt; L2[(K8S 集群)]
+
+    style AGENT fill:#FF6B6B,stroke:#333,color:#fff
+    style R1 fill:#FFE66D,stroke:#333,color:#333
+    style R2 fill:#FFE66D,stroke:#333,color:#333
+</code></pre>
+<p><strong>场景</strong>：定时巡检（每天 9 点自动查日志告警）、自动化运维。不需要用户在电脑前。</p>
+<hr>
+<h2>12. 总结：三句话记住 MCP</h2>
+<table>
+<thead>
+<tr>
+<th></th>
+<th></th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>它是什么</strong></td>
+<td>大模型与外部世界之间的标准通信协议，像 USB-C 一样统一了&quot;模型 ↔ 工具&quot;的对接方式</td>
+</tr>
+<tr>
+<td><strong>它干什么</strong></td>
+<td>让大模型能<strong>发现</strong>有什么工具可用 → <strong>决定</strong>调哪个 → <strong>拿到</strong>结果 → <strong>生成</strong>最终回答</td>
+</tr>
+<tr>
+<td><strong>数据怎么流</strong></td>
+<td><code>大模型(function_call) → MCP Client(转发JSON-RPC) → MCP Server(调内部API) → MCP Client(回传) → 大模型(生成回答)</code>，全程 HTTPS，你的电脑是必经中转站</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就一句话</strong>：MCP 把&quot;大模型想帮忙但够不到&quot;和&quot;内部系统有数据但听不懂人话&quot;之间的那个断点，用一套标准协议接上了。</p>
+<hr>
+<p><em>写于 2026-07-27 · 基于实际企业级 MCP 落地经验</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
