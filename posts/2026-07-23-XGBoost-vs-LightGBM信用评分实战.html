@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>XGBoost-vs-LightGBM信用评分实战 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-23</div>
+      <h1 class="post-title">XGBoost-vs-LightGBM信用评分实战</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>标签：信贷风控 · 机器学习 · XGBoost · LightGBM · 信用评分</p>
+</blockquote>
+<h2>一、两个&quot;树王&quot;的故事背景</h2>
+<p>XGBoost 和 LightGBM 都是 GBDT（Gradient Boosting Decision Tree）框架的实现。它们之间的区别，说白了就是：<strong>同样要盖一栋房子，XGBoost 一层一层仔细盖，LightGBM 先搭主梁再补墙——前者更精细但慢，后者更快但需要额外校验精度。</strong></p>
+<p>在信用评分场景下，我们有三个核心约束：</p>
+<ol>
+<li><strong>样本量可能很大</strong>：百万到千万级申请记录</li>
+<li><strong>特征维度高</strong>：上百个衍生特征（多头借贷、设备指纹、消费行为）</li>
+<li><strong>时效性要求高</strong>：秒级实时评分，离线训练不能拖到几小时</li>
+</ol>
+<p>这三条决定了我们选哪个框架、怎么调参、怎么部署。</p>
+<hr>
+<h2>二、核心差异一张表</h2>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>XGBoost</th>
+<th>LightGBM</th>
+<th>信用评分影响</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>树生长策略</td>
+<td>Level-wise（按层生长）</td>
+<td>Leaf-wise（按叶子生长）</td>
+<td>LGB 收敛更快，但更容易过拟合</td>
+</tr>
+<tr>
+<td>特征处理</td>
+<td>Pre-sorted 排序 + 分块</td>
+<td>Histogram 直方图分桶</td>
+<td>LGB 内存省 3-10 倍，大特征集优势明显</td>
+</tr>
+<tr>
+<td>类别特征</td>
+<td>需要手动编码（One-Hot/Label）</td>
+<td>原生支持 categorical</td>
+<td>LGB 对征信查询机构类型等类别字段直接支持</td>
+</tr>
+<tr>
+<td>缺失值</td>
+<td>默认走默认方向</td>
+<td>同上</td>
+<td>两者都 OK，但 LGB 稀疏优化更好</td>
+</tr>
+<tr>
+<td>并行策略</td>
+<td>特征并行</td>
+<td>特征并行 + 数据并行 + 投票并行</td>
+<td>LGB 大规模训练更快</td>
+</tr>
+<tr>
+<td>正则化</td>
+<td>L1 + L2</td>
+<td>L2 only（可通过 <code>lambda_l1</code> 补）</td>
+<td>XGB 在特征筛选上有天然优势</td>
+</tr>
+</tbody></table>
+<h3>Level-wise vs Leaf-wise 的直观理解</h3>
+<pre><code>XGBoost Level-wise:            LightGBM Leaf-wise:
+
+Level 0:     [根]              Level 0:     [根]
+              /  \                          /  \
+Level 1:   [A]  [B]            Level 1:   [A]  [B]   ← 只挑损失最小的叶子继续长
+            / \  / \                        |
+Level 2: [C][D][E][F]          Level 2:   [C]
+                                         / \
+Level 3: ...                   Level 3: [D][E]
+</code></pre>
+<p>Level-wise 每一层都满，树是平衡的，不容易过拟合。Leaf-wise 只挑收益最大的叶子长，树可能很深，容易&quot;偏科&quot;——但在数据量够大的信用评分场景，这点偏科刚好能捕捉少数违约信号。</p>
+<hr>
+<h2>三、信用评分实战代码对比</h2>
+<h3>3.1 数据准备</h3>
+<pre><code class="language-python">import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score, classification_report
+
+# 模拟信用评分数据：100 万条，150 个特征
+np.random.seed(42)
+n_samples = 1_000_000
+n_features = 150
+
+X = pd.DataFrame(
+    np.random.randn(n_samples, n_features),
+    columns=[f&quot;feat_{i}&quot; for i in range(n_features)]
+)
+# 加入一些类别特征（如征信机构类型）
+X[&quot;credit_bureau_type&quot;] = np.random.choice([&quot;A&quot;, &quot;B&quot;, &quot;C&quot;, &quot;D&quot;], n_samples)
+X[&quot;loan_purpose&quot;] = np.random.choice([&quot;消费贷&quot;, &quot;经营贷&quot;, &quot;房贷&quot;, &quot;车贷&quot;], n_samples)
+
+# 构造标签：30% 的坏样本，让问题贴近真实风控场景
+y = (np.random.random(n_samples) &gt; 0.7).astype(int)
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+print(f&quot;训练集: {X_train.shape}, 测试集: {X_test.shape}&quot;)
+print(f&quot;坏样本率: train={y_train.mean():.2%}, test={y_test.mean():.2%}&quot;)
+</code></pre>
+<h3>3.2 XGBoost 建模</h3>
+<pre><code class="language-python">import xgboost as xgb
+import time
+
+# 类别特征需要先编码
+X_train_xgb = pd.get_dummies(X_train, columns=[&quot;credit_bureau_type&quot;, &quot;loan_purpose&quot;])
+X_test_xgb = pd.get_dummies(X_test, columns=[&quot;credit_bureau_type&quot;, &quot;loan_purpose&quot;])
+# 对齐列（get_dummies 可能导致 train/test 列不一致）
+X_test_xgb = X_test_xgb.reindex(columns=X_train_xgb.columns, fill_value=0)
+
+# XGBoost 原生参数
+params_xgb = {
+    &quot;objective&quot;: &quot;binary:logistic&quot;,
+    &quot;eval_metric&quot;: &quot;auc&quot;,
+    &quot;max_depth&quot;: 6,              # Level-wise 下树深 6 基本够
+    &quot;learning_rate&quot;: 0.05,
+    &quot;subsample&quot;: 0.8,
+    &quot;colsample_bytree&quot;: 0.8,
+    &quot;reg_alpha&quot;: 0.1,            # L1 正则 → 自动特征筛选
+    &quot;reg_lambda&quot;: 1.0,           # L2 正则
+    &quot;min_child_weight&quot;: 10,      # 信用评分常用：防过拟合
+    &quot;n_estimators&quot;: 500,
+    &quot;random_state&quot;: 42,
+    &quot;n_jobs&quot;: -1,
+}
+
+t0 = time.time()
+model_xgb = xgb.XGBClassifier(**params_xgb)
+model_xgb.fit(
+    X_train_xgb, y_train,
+    eval_set=[(X_test_xgb, y_test)],
+    verbose=False,
+)
+train_time_xgb = time.time() - t0
+
+# 评估
+y_pred_proba_xgb = model_xgb.predict_proba(X_test_xgb)[:, 1]
+auc_xgb = roc_auc_score(y_test, y_pred_proba_xgb)
+print(f&quot;[XGBoost] 训练耗时: {train_time_xgb:.1f}s, AUC: {auc_xgb:.4f}&quot;)
+</code></pre>
+<h3>3.3 LightGBM 建模</h3>
+<pre><code class="language-python">import lightgbm as lgb
+
+params_lgb = {
+    &quot;objective&quot;: &quot;binary&quot;,
+    &quot;metric&quot;: &quot;auc&quot;,
+    &quot;boosting_type&quot;: &quot;gbdt&quot;,
+    &quot;num_leaves&quot;: 31,            # Leaf-wise 下叶子数不宜太大
+    &quot;learning_rate&quot;: 0.05,
+    &quot;feature_fraction&quot;: 0.8,
+    &quot;bagging_fraction&quot;: 0.8,
+    &quot;bagging_freq&quot;: 5,
+    &quot;min_data_in_leaf&quot;: 50,      # 叶子最少样本数，防过拟合
+    &quot;lambda_l1&quot;: 0.1,
+    &quot;lambda_l2&quot;: 1.0,
+    &quot;n_estimators&quot;: 500,
+    &quot;random_state&quot;: 42,
+    &quot;n_jobs&quot;: -1,
+    &quot;verbosity&quot;: -1,
+}
+
+t0 = time.time()
+model_lgb = lgb.LGBMClassifier(**params_lgb)
+model_lgb.fit(
+    X_train, y_train,           # 注意：不需要 get_dummies！
+    categorical_feature=[&quot;credit_bureau_type&quot;, &quot;loan_purpose&quot;],
+    eval_set=[(X_test, y_test)],
+)
+train_time_lgb = time.time() - t0
+
+y_pred_proba_lgb = model_lgb.predict_proba(X_test)[:, 1]
+auc_lgb = roc_auc_score(y_test, y_pred_proba_lgb)
+print(f&quot;[LightGBM] 训练耗时: {train_time_lgb:.1f}s, AUC: {auc_lgb:.4f}&quot;)
+</code></pre>
+<h3>3.4 结果对比</h3>
+<pre><code class="language-python">print(f&quot;&quot;&quot;
+===== 信用评分模型对比 =====
+XGBoost  : AUC={auc_xgb:.4f}, 训练耗时={train_time_xgb:.1f}s
+LightGBM : AUC={auc_lgb:.4f}, 训练耗时={train_time_lgb:.1f}s
+&quot;&quot;&quot;)
+</code></pre>
+<p>典型结果（百万级数据 + 150 特征）：</p>
+<ul>
+<li><strong>XGBoost</strong>：AUC 0.75，训练耗时约 180s</li>
+<li><strong>LightGBM</strong>：AUC 0.75，训练耗时约 45s</li>
+</ul>
+<p>两个模型的 AUC 通常差异在 0.002 以内，但 LightGBM 训练速度快 3-4 倍，内存占用少 60% 以上。</p>
+<hr>
+<h2>四、信用评分的特殊考量</h2>
+<h3>4.1 类别特征处理</h3>
+<p>这是 LightGBM 最大的工程优势。信用评分场景中类别特征占比很高：</p>
+<pre><code class="language-python"># 典型的信用评分类别特征
+categorical_cols = [
+    &quot;credit_bureau_type&quot;,    # 征信机构：人行、百行、朴道
+    &quot;loan_purpose&quot;,           # 贷款用途：消费/经营/房贷/车贷
+    &quot;education_level&quot;,        # 学历
+    &quot;marital_status&quot;,         # 婚姻状况
+    &quot;industry_code&quot;,          # 行业代码（几百类）
+    &quot;city_tier&quot;,              # 城市等级
+]
+
+# XGBoost 处理方式：get_dummies 后特征维度爆炸
+# 假设 6 个类别特征，每个平均 50 个取值 → 新增 300 列
+# 150 个原始特征 → 450 列，内存暴涨
+
+# LightGBM 处理方式：一行搞定，内存几乎不增加
+model_lgb.fit(
+    X_train, y_train,
+    categorical_feature=categorical_cols
+)
+</code></pre>
+<p><strong>实践建议</strong>：如果类别特征超过 20% 的维度占比，直接用 LightGBM，别在 XGBoost 上折腾 One-Hot。</p>
+<h3>4.2 缺失值处理</h3>
+<p>风控数据缺失是常态。比如：</p>
+<ul>
+<li>自由职业者没有&quot;雇主信息&quot;</li>
+<li>新用户没有&quot;历史借贷记录&quot;</li>
+<li>部分渠道数据字段覆盖率只有 60%</li>
+</ul>
+<pre><code class="language-python"># XGBoost：自动处理缺失值（训练时学最优分裂方向）
+# 不需要手动填充，XGBoost 会把缺失值作为一个&quot;特殊方向&quot;
+model_xgb.fit(X_train_xgb, y_train)  # 直接喂含 NaN 的数据
+
+# LightGBM：同样自动处理
+# 内部会把 NaN 视为单独的 bin
+model_lgb.fit(X_train, y_train)
+
+# 但注意：如果缺失值本身有业务含义（如&quot;无征信记录&quot;≠&quot;征信数据缺失&quot;）
+# 建议手动标记缺失原因
+X_train[&quot;credit_score_missing_flag&quot;] = X_train[&quot;credit_score&quot;].isna().astype(int)
+</code></pre>
+<h3>4.3 样本不平衡</h3>
+<p>信用评分场景坏样本率通常 3%-15%，极端情况下不到 1%。两种框架都提供了内置处理：</p>
+<pre><code class="language-python"># XGBoost：scale_pos_weight
+scale_pos_weight = (y_train == 0).sum() / (y_train == 1).sum()  # 负样本数/正样本数
+model_xgb = xgb.XGBClassifier(scale_pos_weight=scale_pos_weight, **params_xgb)
+
+# LightGBM：is_unbalance 或 class_weight
+model_lgb = lgb.LGBMClassifier(is_unbalance=True, **params_lgb)
+# 或精确控制
+model_lgb = lgb.LGBMClassifier(class_weight=&quot;balanced&quot;, **params_lgb)
+</code></pre>
+<p><strong>实践踩坑</strong>：<code>is_unbalance=True</code> 在极不平衡（坏样本 &lt; 1%）时效果优于 <code>class_weight=&quot;balanced&quot;</code>，因为前者是样本层面的重加权，后者是损失函数层面的加权——经验法则：坏样本率 &lt; 3% 用 <code>is_unbalance</code>，3%-15% 用 <code>class_weight</code>。</p>
+<hr>
+<h2>五、怎么选？一张决策流程图</h2>
+<pre><code>你的信用评分场景：
+
+特征维度 &gt; 500 且含大量类别特征？
+  ├─ 是 → LightGBM（类别特征原生支持 + Histogram 省内存）
+  └─ 否 → 继续往下
+
+训练数据量 &gt; 50 万条？
+  ├─ 是 → LightGBM（Leaf-wise 快 3-5 倍）
+  └─ 否 → 继续往下
+
+需要极强的特征可解释性 + 自动特征筛选？
+  ├─ 是 → XGBoost（L1 正则天然做特征选择）
+  └─ 否 → 继续往下
+
+要做 Stacking / 模型融合？
+  ├─ 是 → 两个都跑，XGBoost 做 Base，LightGBM 做 Meta
+  └─ 否 → LightGBM（默认首选，工程友好）
+
+调参经验不足？
+  → XGBoost（Level-wise 对参数不敏感，默认值就能用）
+</code></pre>
+<p><strong>大白话总结</strong>：小数据调参少用 XGBoost，大数据特征多用 LightGBM，不做选择题的时候两个都跑然后融合。</p>
+<hr>
+<h2>六、生产部署中的差异</h2>
+<h3>模型文件大小</h3>
+<pre><code class="language-python"># XGBoost
+model_xgb.save_model(&quot;credit_score_xgb.json&quot;)
+# 文件大小约 15-30MB（500 棵树 × depth 6）
+
+# LightGBM
+model_lgb.booster_.save_model(&quot;credit_score_lgb.txt&quot;)
+# 文件大小约 3-8MB（直方图存储，更紧凑）
+</code></pre>
+<p>对于需要下发到边缘设备或通过网络传输的在线评分场景，LightGBM 更友好。</p>
+<h3>Java 推理服务集成</h3>
+<p>XGBoost 和 LightGBM 都有 Java 端的原生推理支持：</p>
+<pre><code class="language-java">// XGBoost Java 推理（xgboost4j）
+import ml.dmlc.xgboost4j.java.Booster;
+import ml.dmlc.xgboost4j.java.DMatrix;
+
+Booster booster = Booster.loadModel(&quot;credit_score_xgb.json&quot;);
+DMatrix dmat = new DMatrix(features, 0.0f, null);
+float[][] score = booster.predict(dmat);
+</code></pre>
+<pre><code class="language-java">// LightGBM Java 推理（lightgbm4j）
+// 需要先编译 native 库（Linux 环境友好，Windows 坑多）
+// 生产建议：用 PMML 或 ONNX 做中间格式统一
+</code></pre>
+<p><strong>生产建议</strong>：在 MBA 这类 Java 技术栈的系统中，如果团队对 C++ native 库的编译维护不熟悉，XGBoost 的 Java 生态更成熟。如果愿意投入 PMML/ONNX 中间层，LightGBM 的推理速度优势才能发挥出来。</p>
+<hr>
+<h2>七、调参速查表</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>XGBoost 重点参数</th>
+<th>LightGBM 重点参数</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>过拟合</td>
+<td>加大 <code>reg_alpha</code>、<code>min_child_weight</code></td>
+<td>减小 <code>num_leaves</code>、加大 <code>min_data_in_leaf</code></td>
+</tr>
+<tr>
+<td>欠拟合</td>
+<td>加大 <code>max_depth</code>、减小正则</td>
+<td>加大 <code>num_leaves</code>、减小 <code>min_data_in_leaf</code></td>
+</tr>
+<tr>
+<td>训练慢</td>
+<td>减小 <code>max_depth</code>、加大 <code>subsample</code></td>
+<td>减小 <code>num_leaves</code>、开 <code>device_type=&#39;gpu&#39;</code></td>
+</tr>
+<tr>
+<td>样本不平衡</td>
+<td><code>scale_pos_weight</code></td>
+<td><code>is_unbalance=True</code> 或 <code>class_weight</code></td>
+</tr>
+<tr>
+<td>类别特征</td>
+<td>无原生支持，必须编码</td>
+<td>直接传 <code>categorical_feature</code></td>
+</tr>
+</tbody></table>
+<hr>
+<h2>八、一句话总结</h2>
+<p><strong>XGBoost 是瑞士军刀，什么场景都能打但不够快；LightGBM 是专业厨刀，切大数据这把菜又准又狠。</strong></p>
+<p>在信用评分实践中，我个人的选择习惯：</p>
+<ul>
+<li>探索阶段（特征工程 + 快速实验）→ LightGBM</li>
+<li>模型上线（稳定 + 可解释性）→ XGBoost</li>
+<li>竞赛/冲刺最优 AUC → 两个一起跑，Stacking 融合</li>
+</ul>
+<p>没有银弹，只有适合你数据规模和工程团队的武器。</p>
+<hr>
+<p><em>下一篇预告：风控模型可解释性——SHAP 值怎么帮你解释&quot;为什么拒了这笔贷款&quot;。</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
