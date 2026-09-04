@@ -1,0 +1,267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>时间窗口特征设计风控实战 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-25</div>
+      <h1 class="post-title">时间窗口特征设计风控实战</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>模型跑出 AUC 0.82，上线后 KS 跌到 0.18——不是你模型没训好，是你的时间窗口设计埋了雷。</p>
+</blockquote>
+<hr>
+<h2>一、什么是时间窗口特征</h2>
+<p>时间窗口特征，说白了就是在&quot;过去 N 天/N 个月&quot;这个滑动窗口内，对某个实体的行为做聚合统计。</p>
+<p>举个例子：过去 30 天内，用户 A 的登录设备数、交易笔数、最大单笔金额。这些不是从用户注册那一刻算到现在的累计值，而是<strong>只看最近一段时间内的行为</strong>。</p>
+<p>为什么不能直接用累计值？因为人的行为会变。三个月前天天剁手的用户，最近一个月突然沉寂——累计值看不出这个变化，但 30 天窗口能。</p>
+<pre><code class="language-python"># 错误做法：累计特征，信息被历史稀释
+df[&#39;total_txn_cnt&#39;] = df.groupby(&#39;user_id&#39;)[&#39;txn_amt&#39;].transform(&#39;count&#39;)
+
+# 正确做法：滑动窗口特征，捕捉近期行为变化
+df[&#39;txn_cnt_30d&#39;] = df[df[&#39;event_date&#39;] &gt;= df[&#39;event_date&#39;].max() - pd.Timedelta(days=30)] \
+    .groupby(&#39;user_id&#39;)[&#39;txn_amt&#39;].transform(&#39;count&#39;)
+</code></pre>
+<p><strong>说白了就是：你不关心用户这辈子干了什么，你只关心他最近一段时间干了什么。时间窗口就是那个&quot;最近一段时间&quot;的标尺。</strong></p>
+<hr>
+<h2>二、时间窗口特征的三个关键维度</h2>
+<p>设计一个时间窗口特征，需要同时决定三件事：</p>
+<table>
+<thead>
+<tr>
+<th>维度</th>
+<th>含义</th>
+<th>典型取值</th>
+<th>风控场景示例</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>窗口长度</td>
+<td>往回看多久</td>
+<td>7天/30天/90天/180天</td>
+<td>贷前：90天行为；反欺诈：7天短窗</td>
+</tr>
+<tr>
+<td>聚合函数</td>
+<td>怎么算</td>
+<td>count/sum/avg/max/min/std/nunique</td>
+<td>交易笔数(count)、金额总和(sum)、设备数(nunique)</td>
+</tr>
+<tr>
+<td>分组维度</td>
+<td>按什么分组</td>
+<td>用户/设备/商户/IP/卡号</td>
+<td>按设备聚合防设备农场，按商户聚合防商户套现</td>
+</tr>
+</tbody></table>
+<p>三维一乘，组合爆炸。一个用户实体配 5 个窗口长度 × 6 个聚合函数 × 3 个分组维度 = 90 个特征。但这 90 个不是乱造的，每一组都要回答一个业务问题。</p>
+<p><strong>关键原则：特征不是从笛卡尔积里批量生成的，是每个都带着业务假设设计的。</strong></p>
+<pre><code class="language-python"># 三维组合的工程实现——不是手工写 90 行，是用配置驱动
+WINDOW_CONFIGS = [
+    # (窗口天数, 聚合列, 聚合函数, 分组列, 特征名)
+    (7,   &#39;txn_amt&#39;, &#39;sum&#39;,   &#39;user_id&#39;, &#39;txn_amt_sum_7d&#39;),
+    (7,   &#39;txn_amt&#39;, &#39;max&#39;,   &#39;user_id&#39;, &#39;txn_amt_max_7d&#39;),
+    (7,   &#39;txn_amt&#39;, &#39;count&#39;, &#39;user_id&#39;, &#39;txn_cnt_7d&#39;),
+    (7,   &#39;device_id&#39;,&#39;nunique&#39;,&#39;user_id&#39;,&#39;device_nunique_7d&#39;),
+    (30,  &#39;txn_amt&#39;, &#39;sum&#39;,   &#39;user_id&#39;, &#39;txn_amt_sum_30d&#39;),
+    (30,  &#39;txn_amt&#39;, &#39;avg&#39;,   &#39;user_id&#39;, &#39;txn_amt_avg_30d&#39;),
+    (30,  &#39;merchant&#39;,&#39;nunique&#39;,&#39;user_id&#39;,&#39;merchant_nunique_30d&#39;),
+    (90,  &#39;txn_amt&#39;, &#39;sum&#39;,   &#39;user_id&#39;, &#39;txn_amt_sum_90d&#39;),
+    (90,  &#39;txn_amt&#39;, &#39;std&#39;,   &#39;user_id&#39;, &#39;txn_amt_std_90d&#39;),
+    (180, &#39;txn_amt&#39;, &#39;sum&#39;,   &#39;user_id&#39;, &#39;txn_amt_sum_180d&#39;),
+]
+
+def build_window_features(df, configs):
+    features = pd.DataFrame()
+    max_date = df[&#39;event_date&#39;].max()
+    for window_days, col, agg, group_col, feat_name in configs:
+        window_start = max_date - pd.Timedelta(days=window_days)
+        window_df = df[df[&#39;event_date&#39;] &gt;= window_start]
+        if agg == &#39;nunique&#39;:
+            feat = window_df.groupby(group_col)[col].nunique()
+        elif agg == &#39;std&#39;:
+            feat = window_df.groupby(group_col)[col].std()
+        elif agg == &#39;avg&#39;:
+            feat = window_df.groupby(group_col)[col].mean()
+        elif agg == &#39;max&#39;:
+            feat = window_df.groupby(group_col)[col].max()
+        elif agg == &#39;sum&#39;:
+            feat = window_df.groupby(group_col)[col].sum()
+        else:  # count
+            feat = window_df.groupby(group_col)[col].count()
+        features[feat_name] = feat
+    return features.fillna(0)
+</code></pre>
+<hr>
+<h2>三、长窗口 vs 短窗口：不是越长越好</h2>
+<p>很多新人以为窗口越长信息越多，实际恰恰相反。</p>
+<p><strong>短窗口（7天/14天）的优势：</strong></p>
+<ul>
+<li>对行为突变敏感——昨天突然换了 5 个设备登录，7 天窗立刻捕捉</li>
+<li>数据稀疏风险小——短窗数据新，不容易缺字段</li>
+<li>但噪声大——周末和节假日行为模式不同，容易误判</li>
+</ul>
+<p><strong>长窗口（90天/180天）的优势：</strong></p>
+<ul>
+<li>稳定性好——不会因为用户出差一周就判成高风险</li>
+<li>但&quot;历史包袱&quot;重——180 天前的高频交易用户，最近一个月已经不活跃了，长窗均值仍然好看</li>
+</ul>
+<p><strong>正确的做法是长短窗搭配，用&quot;变化率&quot;类特征做交叉：</strong></p>
+<pre><code class="language-python"># 长短窗交叉特征：近期行为是否发生了突变
+df[&#39;txn_cnt_change_ratio&#39;] = df[&#39;txn_cnt_7d&#39;] / (df[&#39;txn_cnt_90d&#39;] / 13 + 1)  # 防除零
+# 这个比值 &gt; 2 说明最近一周交易量远超过去三个月周均——要么被盗号了，要么在刷单
+df[&#39;device_switch_flag&#39;] = (df[&#39;device_nunique_7d&#39;] &gt;= 3).astype(int)  # 7天内换设备≥3次
+df[&#39;amt_volatility&#39;] = df[&#39;txn_amt_std_7d&#39;] / (df[&#39;txn_amt_avg_30d&#39;] + 1)  # 金额波动率
+</code></pre>
+<p>变化率特征往往比单一窗口的聚合值更有区分力。IV 值最高的那几个特征，十有八九是&quot;比例&quot;和&quot;变化率&quot;类的。</p>
+<hr>
+<h2>四、时间泄露：让模型作弊的元凶</h2>
+<p>这是窗口特征设计里最隐蔽也最致命的坑。</p>
+<p><strong>什么叫时间泄露？</strong> 你的训练样本标注的是&quot;2025-03-15 是否逾期&quot;，但你的特征窗口的截止日期跑到 2025-03-15 之后去了——等于模型在&quot;预测&quot;时已经看到了&quot;未来&quot;的信息。</p>
+<p>举个具体的反例：</p>
+<pre><code class="language-python"># ❌ 时间泄露——窗口计算用到了样本日期之后的数据
+max_date = df[&#39;event_date&#39;].max()  # 假设是 2025-06-01
+window_start = max_date - pd.Timedelta(days=30)  # 2025-05-02 到 2025-06-01
+# 但你的样本标签是 2025-03-15 的——窗口包含了 3-15 之后两个月的数据！
+
+# ✅ 正确做法：每个样本用自己的 observation_date 做窗口截止
+def safe_window_features(df, obs_date_col=&#39;apply_date&#39;, label_date_col=&#39;label_date&#39;):
+    features = []
+    for _, row in df.iterrows():
+        obs_end = row[obs_date_col]  # 观测窗口终点 = 样本日期
+        window_30d = df[(df[&#39;user_id&#39;] == row[&#39;user_id&#39;]) &amp; 
+                        (df[&#39;event_date&#39;] &gt;= obs_end - pd.Timedelta(days=30)) &amp;
+                        (df[&#39;event_date&#39;] &lt; obs_end)]  # 严格 &lt; obs_end，不含当天
+        features.append({
+            &#39;user_id&#39;: row[&#39;user_id&#39;],
+            &#39;txn_cnt_30d&#39;: len(window_30d),
+            &#39;txn_amt_sum_30d&#39;: window_30d[&#39;txn_amt&#39;].sum(),
+        })
+    return pd.DataFrame(features)
+</code></pre>
+<p>时间泄露的典型症状：<strong>训练集 AUC 0.95，测试集 AUC 0.65</strong>。差距超过 0.1，第一时间检查时间泄露。</p>
+<p><strong>根因：你窗口计算的 max_date 用了全局最大值而不是每个样本自己的 observation_date。</strong></p>
+<hr>
+<h2>五、Java 生产环境的窗口特征计算</h2>
+<p>Python 离线训练跑得飞起，到了 Java 线上推理就傻眼了——没有 DataFrame，没有 groupby，没有 pd.Timedelta。</p>
+<p><strong>生产环境做窗口特征只有两条路：</strong></p>
+<h3>路线 A：预计算 + 特征存储（推荐）</h3>
+<pre><code class="language-java">// 离线任务（Spark/Flink）每天凌晨跑一次，把窗口特征算好存进 Redis/特征平台
+// 在线推理只做 KV 查询，不实时聚合
+
+public class WindowFeatureLoader {
+    
+    private final JedisPool jedisPool;
+    
+    // key 格式: feat:user:{userId}:{windowName}
+    // value: 浮点数
+    public Map&lt;String, Double&gt; loadWindowFeatures(String userId) {
+        Map&lt;String, Double&gt; features = new HashMap&lt;&gt;();
+        try (Jedis jedis = jedisPool.getResource()) {
+            List&lt;String&gt; keys = Arrays.asList(
+                &quot;feat:user:&quot; + userId + &quot;:txn_cnt_7d&quot;,
+                &quot;feat:user:&quot; + userId + &quot;:txn_amt_sum_30d&quot;,
+                &quot;feat:user:&quot; + userId + &quot;:device_nunique_7d&quot;,
+                &quot;feat:user:&quot; + userId + &quot;:merchant_nunique_30d&quot;,
+                &quot;feat:user:&quot; + userId + &quot;:txn_amt_std_90d&quot;
+            );
+            List&lt;String&gt; values = jedis.mget(keys.toArray(new String[0]));
+            for (int i = 0; i &lt; keys.size(); i++) {
+                if (values.get(i) != null) {
+                    // key 去掉前缀保留特征名
+                    String featName = keys.get(i).replace(&quot;feat:user:&quot; + userId + &quot;:&quot;, &quot;&quot;);
+                    features.put(featName, Double.parseDouble(values.get(i)));
+                }
+            }
+        }
+        return features;  // 缺失特征返回 null，模型侧做默认值填充
+    }
+}
+</code></pre>
+<h3>路线 B：实时流计算（Flink/Kafka Streams）</h3>
+<p>适合对时效性要求极高的反欺诈场景——不能等 T+1 离线跑批，需要秒级更新。</p>
+<pre><code class="language-java">// Flink 滑动窗口聚合示例（简化）
+DataStream&lt;TxnEvent&gt; txnStream = env.addSource(kafkaSource);
+
+txnStream
+    .keyBy(TxnEvent::getUserId)
+    .window(SlidingEventTimeWindows.of(Time.days(7), Time.hours(1)))  // 7天窗，每小时滑动
+    .aggregate(new TxnCountAggregator())  // 自定义聚合：count/sum/max
+    .map(result -&gt; new FeatureUpdate(result.getUserId(), &quot;txn_cnt_7d&quot;, result.getCount()))
+    .addSink(redisSink);  // 写入 Redis 供在线推理读取
+</code></pre>
+<p><strong>绝大多数场景路线 A 就够了</strong>——T+1 的窗口特征对信用评分来说时效完全够用。反欺诈才需要路线 B。</p>
+<hr>
+<h2>六、缺失值：窗口特征的天生短板</h2>
+<p>窗口特征有一个天然问题：<strong>新用户没有历史行为，窗口里是空的</strong>。</p>
+<p>这不是数据质量问题，是业务现实。但你不能直接填 0——因为&quot;没有交易&quot;和&quot;交易金额为 0&quot;在业务上完全不同。</p>
+<pre><code class="language-python"># 缺失值处理策略——分场景选
+# 策略1：新用户用全局中位数填充（保守）
+df[&#39;txn_cnt_30d&#39;] = df[&#39;txn_cnt_30d&#39;].fillna(df[&#39;txn_cnt_30d&#39;].median())
+
+# 策略2：新用户用-1标记，让模型自己学（推荐）
+df[&#39;txn_cnt_30d&#39;] = df[&#39;txn_cnt_30d&#39;].fillna(-1)
+df[&#39;is_new_user&#39;] = (df[&#39;txn_cnt_30d&#39;] == -1).astype(int)  # 加一个标识特征
+
+# 策略3：分用户生命周期差异化填充
+df.loc[df[&#39;user_age_days&#39;] &lt; 30, &#39;txn_cnt_30d&#39;] = df.loc[
+    df[&#39;user_age_days&#39;] &lt; 30, &#39;txn_cnt_30d&#39;
+].fillna(df.loc[df[&#39;user_age_days&#39;] &lt; 30, &#39;txn_cnt_30d&#39;].median())
+</code></pre>
+<p><strong>推荐策略 2：用 -1 标记 + 加一个 <code>is_new_user</code> 二值特征。</strong> 树模型能自动学到&quot;值为 -1 时往哪个方向分裂&quot;。</p>
+<hr>
+<h2>七、常见坑与避坑指南</h2>
+<h3>坑 1：窗口重叠导致特征高度相关</h3>
+<pre><code class="language-python"># 7天、14天、30天窗口的 sum 特征相关系数往往 &gt; 0.95
+# 没必要三个都保留，保留最短的和最长的，中间档删掉
+df[[&#39;txn_amt_sum_7d&#39;, &#39;txn_amt_sum_14d&#39;, &#39;txn_amt_sum_30d&#39;]].corr()
+# 只保留 7d 和 30d，14d 冗余
+</code></pre>
+<h3>坑 2：周末效应</h3>
+<p>7 天窗口的周一数据和周五数据分布完全不同——因为周六周日交易量天然低。解决方案：<strong>用 14 天或 28 天（完整周）替代 7 天短窗</strong>。</p>
+<h3>坑 3：窗口计算性能</h3>
+<p>不要对每一条样本都跑一次完整 groupby——10 万用户 × 90 天流水 = 几千万行，O(n²) 会炸。</p>
+<pre><code class="language-python"># ❌ 慢：逐行循环计算
+# ✅ 快：一次 groupby + rolling + merge
+df[&#39;event_date&#39;] = pd.to_datetime(df[&#39;event_date&#39;])
+df = df.sort_values([&#39;user_id&#39;, &#39;event_date&#39;])
+# rolling 只对已排序的 group 内生效
+df[&#39;txn_cnt_7d&#39;] = df.groupby(&#39;user_id&#39;)[&#39;txn_amt&#39;].transform(
+    lambda x: x.rolling(&#39;7D&#39;, min_periods=1).count()
+)
+</code></pre>
+<hr>
+<h2>八、总结</h2>
+<p>时间窗口特征设计不是什么高深的算法问题，但它是风控模型从&quot;能跑&quot;到&quot;能用&quot;的关键一步。记住五条：</p>
+<ol>
+<li><strong>每个窗口特征都要对应一个业务假设</strong>——不是从配置表里批量生成出来的</li>
+<li><strong>时间泄露是头号杀手</strong>——训练集 AUC 虚高 0.3 的常见元凶，每个样本用自己的 observation_date</li>
+<li><strong>长短窗搭配 + 变化率交叉</strong>——比单一窗口聚合值的区分力高得多</li>
+<li><strong>生产环境走预计算 + KV 存储</strong>——别在线上做实时 groupby</li>
+<li><strong>新用户窗口为空不是 bug</strong>——用 -1 标记 + <code>is_new_user</code> 特征，让模型自己学</li>
+</ol>
+<p>下次模型上线后 KS 掉得比预期多，别急着调参——先检查你的时间窗口有没有时间泄露、缺失值处理对不对、长短窗搭配合不合理。十个模型翻车，六个死在特征工程，四个里的三个又死在了时间窗口上。</p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
