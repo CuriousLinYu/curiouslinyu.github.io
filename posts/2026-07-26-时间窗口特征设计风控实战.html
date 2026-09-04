@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>时间窗口特征设计风控实战 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-26</div>
+      <h1 class="post-title">时间窗口特征设计风控实战</h1>
+    </header>
+    <div class="post-body">
+<p>时间窗口特征是信贷风控模型中最重要的特征类型之一。一个借款人的历史行为——近 7 天申请了几次、近 30 天登录了几个设备、近 90 天逾期了几次——这些窗口特征的区分能力，往往超过静态特征（年龄、收入、学历）好几个量级。但窗口特征的设计也是一把双刃剑：窗口选错了，要么信息不足，要么引入噪声；更致命的是，窗口特征的计算如果不做&quot;时间穿越防护&quot;，离线验证的 AUC 0.85 上线后直接腰斩。</p>
+<p>这篇文章从四个维度讲时间窗口特征：窗口设计原则、常用窗口模式、防时间穿越的工程实现、以及特征存储与回填。</p>
+<hr>
+<h2>一、窗口设计的三个核心维度</h2>
+<p>设计一个窗口特征，本质上是在回答三个问题：</p>
+<h3>1.1 时间跨度（窗口长度）</h3>
+<table>
+<thead>
+<tr>
+<th>窗口长度</th>
+<th>典型用途</th>
+<th>数据量</th>
+<th>注意事项</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>1-7 天</td>
+<td>短期行为密集度（申请频率、登录次数）</td>
+<td>少</td>
+<td>对近期异常敏感，适合反欺诈</td>
+</tr>
+<tr>
+<td>7-30 天</td>
+<td>中期行为模式（设备切换、联系人变更）</td>
+<td>中</td>
+<td>最常用的窗口，兼顾时效性和稳定性</td>
+</tr>
+<tr>
+<td>30-90 天</td>
+<td>中期信用表现（还款行为、额度使用率）</td>
+<td>中-多</td>
+<td>信用评估的核心窗口</td>
+</tr>
+<tr>
+<td>90-365 天</td>
+<td>长期行为趋势（历史逾期、多头借贷）</td>
+<td>多</td>
+<td>对历史数据完整性要求高</td>
+</tr>
+<tr>
+<td>全量</td>
+<td>累计统计（总借款次数、历史最大逾期天数）</td>
+<td>全部</td>
+<td>兜底特征，不受窗口选择影响</td>
+</tr>
+</tbody></table>
+<p>选窗口长度有一个核心原则：<strong>窗口要覆盖&quot;业务上认为有意义&quot;的时间段</strong>。比如反欺诈场景，欺诈团伙通常在 1-3 天内集中作案，所以窗口设 7 天足够。信用评估场景，借款人的还款行为以月为周期，30-90 天更合理。</p>
+<h3>1.2 统计粒度（聚合函数）</h3>
+<p>同一个窗口，不同的聚合方式产出完全不同的信息：</p>
+<pre><code class="language-python">import pandas as pd
+import numpy as np
+
+# 假设 df 是某用户在窗口内的行为明细表
+# 列：user_id, event_time, amount, event_type, device_id
+
+def build_window_features(df, window_col=&#39;event_time&#39;, base_col=&#39;user_id&#39;):
+    &quot;&quot;&quot;对行为明细做多粒度聚合&quot;&quot;&quot;
+    agg = df.groupby(base_col).agg(
+        # 计数类
+        cnt_total=(&#39;amount&#39;, &#39;count&#39;),          # 总次数
+        cnt_days=(&#39;event_time&#39;, &#39;nunique&#39;),     # 活跃天数
+
+        # 数值统计类
+        amt_sum=(&#39;amount&#39;, &#39;sum&#39;),              # 总金额
+        amt_mean=(&#39;amount&#39;, &#39;mean&#39;),            # 平均金额
+        amt_std=(&#39;amount&#39;, &#39;std&#39;),              # 金额波动
+        amt_max=(&#39;amount&#39;, &#39;max&#39;),              # 最大单笔
+        amt_min=(&#39;amount&#39;, &#39;min&#39;),              # 最小单笔
+
+        # 去重计数
+        device_cnt=(&#39;device_id&#39;, &#39;nunique&#39;),    # 使用设备数
+
+        # 时间间隔
+        last_gap_days=(&#39;event_time&#39;, lambda x:
+            (pd.Timestamp.now() - x.max()).days)  # 距上次行为天数
+    ).reset_index()
+
+    # 衍生比率特征
+    agg[&#39;amt_per_day&#39;] = agg[&#39;amt_sum&#39;] / agg[&#39;cnt_days&#39;].replace(0, 1)
+    agg[&#39;avg_gap_hours&#39;] = 24 * agg[&#39;cnt_days&#39;] / agg[&#39;cnt_total&#39;].replace(0, 1)
+
+    return agg
+</code></pre>
+<h3>1.3 观察点（Reference Point）</h3>
+<p>窗口的&quot;截止时间&quot;选在哪里，直接影响特征是否发生时间穿越。常见的观察点选择：</p>
+<ul>
+<li><strong>以申请时间为观察点</strong>：最安全，所有特征只看申请时刻之前的窗口。这是标准做法。</li>
+<li><strong>以当前时间为观察点</strong>：在线推理时使用，等于申请时间。离线训练时必须回退到每条样本对应的申请时间。</li>
+<li><strong>滑动窗口</strong>：每天/每小时产出一版特征快照，推理时取最新快照。适合实时风控。</li>
+</ul>
+<hr>
+<h2>二、六种高频窗口特征模式</h2>
+<p>以下六种模式覆盖了风控特征工程中 80% 的窗口特征场景。</p>
+<h3>模式 1：申请频率特征</h3>
+<p>&quot;借款人在过去 N 天内申请了多少次？&quot;——这是反欺诈和多头借贷的核心特征。</p>
+<pre><code class="language-sql">-- 近 7/30/90 天申请次数
+SELECT
+    a.user_id,
+    a.apply_date,
+    COUNT(CASE WHEN b.apply_date BETWEEN a.apply_date - 7  AND a.apply_date - 1
+               THEN 1 END) AS apply_cnt_7d,
+    COUNT(CASE WHEN b.apply_date BETWEEN a.apply_date - 30 AND a.apply_date - 1
+               THEN 1 END) AS apply_cnt_30d,
+    COUNT(CASE WHEN b.apply_date BETWEEN a.apply_date - 90 AND a.apply_date - 1
+               THEN 1 END) AS apply_cnt_90d
+FROM apply_record a
+LEFT JOIN apply_record b
+    ON a.user_id = b.user_id
+   AND b.apply_date &lt; a.apply_date
+GROUP BY a.user_id, a.apply_date;
+</code></pre>
+<p>注意 SQL 中的 <code>b.apply_date &lt; a.apply_date</code>——<strong>窗口必须截止到当前申请的前一天</strong>，不能包含当天。包含当天就是时间穿越（当天后续的申请不应该用来预测当天的申请）。</p>
+<h3>模式 2：逾期滚动统计</h3>
+<p>&quot;过去 N 天内有几次逾期？最大逾期天数是多少？&quot;</p>
+<pre><code class="language-python">def build_overdue_features(repay_df, windows=[7, 30, 90, 180]):
+    &quot;&quot;&quot;
+    repay_df: 还款记录表，包含 user_id, due_date, actual_date, apply_date
+    以每笔借款的申请时间为观察点，统计历史逾期
+    &quot;&quot;&quot;
+    features = []
+    for _, row in repay_df.iterrows():
+        uid = row[&#39;user_id&#39;]
+        ref_date = row[&#39;apply_date&#39;]  # 观察点 = 本次申请时间
+
+        history = repay_df[
+            (repay_df[&#39;user_id&#39;] == uid) &amp;
+            (repay_df[&#39;due_date&#39;] &lt; ref_date)  # 只看申请前的还款记录
+        ]
+
+        feat = {&#39;user_id&#39;: uid, &#39;apply_date&#39;: ref_date}
+
+        for w in windows:
+            window_data = history[history[&#39;due_date&#39;] &gt;= ref_date - pd.Timedelta(days=w)]
+
+            feat[f&#39;overdue_cnt_{w}d&#39;] = (window_data[&#39;actual_date&#39;] &gt;
+                                         window_data[&#39;due_date&#39;]).sum()
+            feat[f&#39;overdue_days_max_{w}d&#39;] = (
+                window_data[&#39;actual_date&#39;] - window_data[&#39;due_date&#39;]
+            ).dt.days.max()
+            feat[f&#39;overdue_days_max_{w}d&#39;] = (
+                feat[f&#39;overdue_days_max_{w}d&#39;]
+                if pd.notna(feat[f&#39;overdue_days_max_{w}d&#39;]) else 0
+            )
+
+        features.append(feat)
+
+    return pd.DataFrame(features)
+</code></pre>
+<h3>模式 3：设备/环境变更特征</h3>
+<p>反欺诈领域最重要的特征之一：用户是否频繁切换设备、IP、地理位置。</p>
+<pre><code class="language-python">def build_device_features(login_df, windows=[7, 30]):
+    &quot;&quot;&quot;
+    login_df: 登录日志，含 user_id, login_time, device_id, ip_city
+    &quot;&quot;&quot;
+    features = login_df.groupby(&#39;user_id&#39;).apply(
+        lambda g: pd.Series({
+            **{f&#39;device_cnt_{w}d&#39;: (
+                g[g[&#39;login_time&#39;] &gt;= g[&#39;login_time&#39;].max() - pd.Timedelta(days=w)]
+                [&#39;device_id&#39;].nunique()
+            ) for w in windows},
+            **{f&#39;city_cnt_{w}d&#39;: (
+                g[g[&#39;login_time&#39;] &gt;= g[&#39;login_time&#39;].max() - pd.Timedelta(days=w)]
+                [&#39;ip_city&#39;].nunique()
+            ) for w in windows},
+            &#39;device_cnt_total&#39;: g[&#39;device_id&#39;].nunique(),
+            &#39;city_cnt_total&#39;: g[&#39;ip_city&#39;].nunique()
+        })
+    ).reset_index()
+    return features
+</code></pre>
+<h3>模式 4：行为趋势特征（斜率）</h3>
+<p>不只是看&quot;过去 N 天怎么样&quot;，还要看&quot;趋势是在变好还是变坏&quot;。</p>
+<pre><code class="language-python">from scipy import stats
+
+def build_trend_features(time_series_df):
+    &quot;&quot;&quot;
+    time_series_df: 用户某行为的时间序列，含 date, value
+    用线性回归斜率判断趋势方向
+    &quot;&quot;&quot;
+    x = np.arange(len(time_series_df))
+    y = time_series_df[&#39;value&#39;].values
+
+    if len(x) &lt; 2:
+        return {&#39;trend_slope&#39;: 0, &#39;trend_r2&#39;: 0}
+
+    slope, intercept, r_value, _, _ = stats.linregress(x, y)
+
+    return {
+        &#39;trend_slope&#39;: slope,       # 正=上升趋势, 负=下降趋势
+        &#39;trend_r2&#39;: r_value ** 2,   # 拟合优度, 接近 1 说明趋势显著
+    }
+</code></pre>
+<h3>模式 5：首次/最近一次的时间间隔</h3>
+<pre><code class="language-python">def build_recency_features(df, user_col, time_col):
+    &quot;&quot;&quot;
+    距离首次行为和最近一次行为的天数
+    &quot;&quot;&quot;
+    agg = df.groupby(user_col).agg(
+        first_date=(time_col, &#39;min&#39;),
+        last_date=(time_col, &#39;max&#39;)
+    )
+    ref_date = pd.Timestamp.now()
+    agg[&#39;days_since_first&#39;] = (ref_date - agg[&#39;first_date&#39;]).dt.days
+    agg[&#39;days_since_last&#39;]  = (ref_date - agg[&#39;last_date&#39;]).dt.days
+    agg[&#39;active_span_days&#39;] = (agg[&#39;last_date&#39;] - agg[&#39;first_date&#39;]).dt.days
+    return agg.reset_index()
+</code></pre>
+<h3>模式 6：窗口间对比（环比/同比）</h3>
+<pre><code class="language-python">def build_window_compare_features(feature_df):
+    &quot;&quot;&quot;
+    对比不同窗口的同一指标，检测行为变化幅度
+    &quot;&quot;&quot;
+    feature_df[&#39;apply_cnt_change_7d_vs_30d&#39;] = (
+        feature_df[&#39;apply_cnt_7d&#39;] /
+        feature_df[&#39;apply_cnt_30d&#39;].replace(0, 1)
+    )
+    feature_df[&#39;device_cnt_change_7d_vs_30d&#39;] = (
+        feature_df[&#39;device_cnt_7d&#39;] /
+        feature_df[&#39;device_cnt_30d&#39;].replace(0, 1)
+    )
+    # &gt;1 表示近期更活跃（可能在集中作案），&lt;1 表示近期收敛
+    return feature_df
+</code></pre>
+<hr>
+<h2>三、防时间穿越的工程实现</h2>
+<p>时间穿越是窗口特征的头号杀手。核心原则就一句话：<strong>训练时，每条样本只能使用该样本&quot;观察时间点之前&quot;的数据。</strong></p>
+<h3>3.1 离线训练的正确姿势</h3>
+<pre><code class="language-python">def build_window_features_safe(behavior_df, sample_df, windows=[7, 30, 90]):
+    &quot;&quot;&quot;
+    防时间穿越的窗口特征构建
+    behavior_df: 全量行为明细，含 user_id, event_time, ...
+    sample_df:   训练样本，含 user_id, sample_time（每条的观察时间）
+    &quot;&quot;&quot;
+    results = []
+
+    for _, sample in sample_df.iterrows():
+        uid = sample[&#39;user_id&#39;]
+        ref_time = sample[&#39;sample_time&#39;]  # 本样本的观察时间点
+
+        # 关键：只看 ref_time 之前的行为
+        history = behavior_df[
+            (behavior_df[&#39;user_id&#39;] == uid) &amp;
+            (behavior_df[&#39;event_time&#39;] &lt; ref_time)
+        ]
+
+        feat = {&#39;user_id&#39;: uid, &#39;sample_time&#39;: ref_time}
+        for w in windows:
+            window_data = history[
+                history[&#39;event_time&#39;] &gt;= ref_time - pd.Timedelta(days=w)
+            ]
+            feat[f&#39;event_cnt_{w}d&#39;] = len(window_data)
+            feat[f&#39;event_days_{w}d&#39;] = window_data[&#39;event_time&#39;].nunique()
+
+        results.append(feat)
+
+    return pd.DataFrame(results)
+</code></pre>
+<h3>3.2 离线训练和在线推理的一致性</h3>
+<p>这是另一个容易出问题的点。离线训练用历史数据按样本时间回退计算，在线推理用实时数据按当前时间计算——两者逻辑要完全一致。</p>
+<p>Java 侧的在线特征计算骨架：</p>
+<pre><code class="language-java">public class WindowFeatureCalculator {
+
+    /**
+     * 在线计算某用户某窗口内的特征
+     * @param userId    用户 ID
+     * @param refTime   观察时间点（申请时间）
+     * @param windowDays 窗口天数
+     * @param featureStore 特征存储服务
+     */
+    public Map&lt;String, Double&gt; calculate(
+            String userId,
+            LocalDateTime refTime,
+            int windowDays,
+            FeatureStore featureStore) {
+
+        LocalDateTime windowStart = refTime.minusDays(windowDays);
+
+        // 从特征存储中查询窗口内的行为明细
+        List&lt;BehaviorEvent&gt; events = featureStore.queryEvents(
+                userId, windowStart, refTime  // [windowStart, refTime)
+        );
+
+        Map&lt;String, Double&gt; features = new LinkedHashMap&lt;&gt;();
+
+        // 计数类
+        features.put(&quot;event_cnt_&quot; + windowDays + &quot;d&quot;,
+                (double) events.size());
+
+        // 去重天数
+        long distinctDays = events.stream()
+                .map(e -&gt; e.getEventTime().toLocalDate())
+                .distinct()
+                .count();
+        features.put(&quot;active_days_&quot; + windowDays + &quot;d&quot;,
+                (double) distinctDays);
+
+        // 金额统计（仅统计有金额的事件）
+        DoubleSummaryStatistics amtStats = events.stream()
+                .filter(e -&gt; e.getAmount() != null)
+                .mapToDouble(BehaviorEvent::getAmount)
+                .summaryStatistics();
+
+        if (amtStats.getCount() &gt; 0) {
+            features.put(&quot;amt_sum_&quot; + windowDays + &quot;d&quot;, amtStats.getSum());
+            features.put(&quot;amt_avg_&quot; + windowDays + &quot;d&quot;, amtStats.getAverage());
+            features.put(&quot;amt_max_&quot; + windowDays + &quot;d&quot;, amtStats.getMax());
+        } else {
+            features.put(&quot;amt_sum_&quot; + windowDays + &quot;d&quot;, 0.0);
+            features.put(&quot;amt_avg_&quot; + windowDays + &quot;d&quot;, 0.0);
+            features.put(&quot;amt_max_&quot; + windowDays + &quot;d&quot;, 0.0);
+        }
+
+        return features;
+    }
+}
+</code></pre>
+<h3>3.3 自检清单</h3>
+<p>每次上线一批窗口特征之前，跑以下三个验证：</p>
+<ol>
+<li><strong>同一用户同一申请时间的特征值，训练环境和推理环境计算结果是否一致？</strong>——随机抽 100 条对比，偏差 &gt; 0 就是 bug。</li>
+<li><strong>时间穿越检查</strong>：对每个窗口特征，用特征重要性或 IV 排个序，如果某个窗口特征的 IV 异常高（&gt; 1.0），大概率是标签泄漏或时间穿越。</li>
+<li><strong>窗口边界检查</strong>：取 <code>ref_time - 1 秒</code> 和 <code>ref_time + 1 秒</code> 两个时间点的特征值，前者应该稳定，后者应该不等于前者（因为前者多了一个边界事件）。如果两者一致，说明窗口的闭区间/开区间处理有问题。</li>
+</ol>
+<hr>
+<h2>四、特征存储与回填</h2>
+<p>窗口特征的计算依赖历史行为明细，这些明细数据通常存储在 OLAP 引擎中（ClickHouse、Doris 等）。离线训练时可以直接从 OLAP 查，但在线推理时不能每次实时去 OLAP 做聚合——延迟太高。</p>
+<p>标准做法是&quot;离线预计算 + 在线实时读取&quot;：</p>
+<pre><code>┌──────────────┐     ┌──────────────────┐     ┌──────────────┐
+│ 行为明细数据   │ ──► │ 离线特征计算任务   │ ──► │ 特征存储      │
+│ (OLAP)       │     │ (Spark/Flink 批)  │     │ (Redis/HBase) │
+└──────────────┘     └──────────────────┘     └──────┬───────┘
+                                                     │
+                                              ┌──────▼───────┐
+                                              │ 在线推理服务   │
+                                              │ 直接读取特征   │
+                                              └──────────────┘
+</code></pre>
+<p>特征回填（给历史样本补充窗口特征）也是一样的逻辑：用样本的申请时间作为观察点，从 OLAP 按时间条件查询窗口内的明细，做聚合后写入样本表。这个过程可以用 Spark 批量跑，核心就是把上面的 Python 单条循环改成 Spark 的窗口函数或 broadcast join。</p>
+<hr>
+<p>窗口特征设计是特征工程里&quot;简单但不容易&quot;的一类——概念简单，但窗口选多大、聚合用什么函数、怎么防时间穿越、怎么保证训练推理一致性，每个环节都有坑。把这几个坑踩明白了，窗口特征的威力才能完全释放。</p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
