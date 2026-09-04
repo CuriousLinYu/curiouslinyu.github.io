@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>反欺诈实战关系图谱实时特征与决策引擎的三角协作 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-25</div>
+      <h1 class="post-title">反欺诈实战关系图谱实时特征与决策引擎的三角协作</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>反欺诈不是&quot;多写几条规则&quot;的事——黑产在进化，你的规则昨天有效不代表今天有效。这篇文章讲的是工程层怎么搭一套能自演化的反欺诈体系。</p>
+</blockquote>
+<hr>
+<h2>1. 为什么规则引擎打不过黑产？</h2>
+<p>典型的反欺诈演进路径：</p>
+<pre><code>V1.0：if (同一设备注册 &gt; 3 次) → 拒绝 → 黑产换设备 → 绕过
+V2.0：if (同一IP注册 &gt; 5 次) → 拒绝 → 黑产换IP池 → 绕过
+V3.0：if (同一设备 OR 同一IP) → 拒绝 → 黑产用设备指纹伪造 → 绕过
+...
+</code></pre>
+<p>每加一条规则，黑产换一种绕过方式。规则引擎的致命短板：<strong>只看单点特征，不看关系结构</strong>。</p>
+<p>反欺诈真正的突破点不在&quot;更多规则&quot;，而在<strong>关系图谱</strong>——把用户、设备、IP、银行卡、手机号抽象为图节点，把注册/登录/交易抽象为边，用图算法发现异常聚集模式。</p>
+<hr>
+<h2>2. 关系图谱：从&quot;点&quot;到&quot;网&quot;</h2>
+<h3>2.1 构图</h3>
+<pre><code class="language-python"># 每个事件产生边，实时写入图数据库
+def build_graph_edge(event):
+    &quot;&quot;&quot;
+    event = {
+        &quot;user_id&quot;: &quot;U12345&quot;,
+        &quot;device_id&quot;: &quot;D_abc123&quot;,
+        &quot;ip&quot;: &quot;10.0.0.1&quot;,
+        &quot;phone&quot;: &quot;13800138000&quot;,
+        &quot;event_type&quot;: &quot;register&quot;,
+        &quot;timestamp&quot;: &quot;2024-07-25T10:30:00&quot;
+    }
+    &quot;&quot;&quot;
+    g = get_graph_connection()
+
+    # 节点：user / device / ip / phone
+    g.merge_vertex(&quot;User&quot;, {&quot;id&quot;: event[&quot;user_id&quot;]})
+    g.merge_vertex(&quot;Device&quot;, {&quot;id&quot;: event[&quot;device_id&quot;]})
+    g.merge_vertex(&quot;IP&quot;, {&quot;id&quot;: event[&quot;ip&quot;]})
+    g.merge_vertex(&quot;Phone&quot;, {&quot;id&quot;: event[&quot;phone&quot;]})
+
+    # 边：user → device / ip / phone（带时间戳属性）
+    g.merge_edge(&quot;REGISTERED_ON&quot;, event[&quot;user_id&quot;], event[&quot;device_id&quot;],
+                 {&quot;timestamp&quot;: event[&quot;timestamp&quot;]})
+    g.merge_edge(&quot;USED_IP&quot;, event[&quot;user_id&quot;], event[&quot;ip&quot;],
+                 {&quot;timestamp&quot;: event[&quot;timestamp&quot;]})
+    g.merge_edge(&quot;BOUND_PHONE&quot;, event[&quot;user_id&quot;], event[&quot;phone&quot;],
+                 {&quot;timestamp&quot;: event[&quot;timestamp&quot;]})
+</code></pre>
+<p>构图完成后，黑产的行为模式在图上一目了然：<strong>正常用户的图是碎片化的孤岛，黑产的图是一个紧密连接的大连通分量</strong>。</p>
+<h3>2.2 两个最实用的图特征</h3>
+<p><strong>特征 1：一度共享邻居数（Shared Neighbors）</strong></p>
+<pre><code class="language-python">def shared_device_count(graph, user_a, user_b):
+    &quot;&quot;&quot;两个用户共用过多少设备&quot;&quot;&quot;
+    devices_a = set(graph.neighbors(user_a, edge_type=&quot;REGISTERED_ON&quot;))
+    devices_b = set(graph.neighbors(user_b, edge_type=&quot;REGISTERED_ON&quot;))
+    return len(devices_a &amp; devices_b)
+</code></pre>
+<p>黑产会用同一个设备注册多个账号——<code>shared_device_count &gt; 0</code> 几乎 100% 是同一批黑产。</p>
+<p><strong>特征 2：连通分量大小（Connected Component Size）</strong></p>
+<pre><code class="language-python">def component_size(graph, user_id, max_depth=3):
+    &quot;&quot;&quot;从该用户出发，3 跳内能到达多少个节点&quot;&quot;&quot;
+    visited = set()
+    queue = [(user_id, 0)]
+    while queue:
+        node, depth = queue.pop(0)
+        if node in visited or depth &gt; max_depth:
+            continue
+        visited.add(node)
+        queue.extend((n, depth + 1) for n in graph.neighbors(node))
+    return len(visited)
+</code></pre>
+<p>正常用户 3 跳内连通几十个节点。黑产团伙 3 跳内可能成千上万——这就是图特征的威力：<strong>单点上无异常，聚集就是铁证</strong>。</p>
+<hr>
+<h2>3. 实时特征：你只有 200ms</h2>
+<p>注册场景的 SLA 通常 200ms 以内。图查询是全量遍历，直接嵌进实时链路必然超时。解法：<strong>离线算特征 → 在线读特征</strong>。</p>
+<pre><code class="language-python"># 离线任务（每小时跑一次）
+def offline_compute_graph_features():
+    g = get_graph_connection()
+    for user in g.scan_vertex(&quot;User&quot;):
+        features = {
+            &quot;shared_device_with&quot;: [],       # 共享设备的关联账号
+            &quot;component_size_3hop&quot;: component_size(g, user, 3),
+            &quot;degree_1hop&quot;: len(g.neighbors(user)),
+        }
+        redis.hset(f&quot;graph_feat:{user}&quot;, mapping=features)
+
+# 在线决策（200ms 内）
+def realtime_anti_fraud(event):
+    user_id = event[&quot;user_id&quot;]
+
+    # 1. 读离线预计算的图特征（Redis，&lt; 1ms）
+    graph_feat = redis.hgetall(f&quot;graph_feat:{user_id}&quot;)
+
+    # 2. 算实时比率特征（&lt; 5ms）
+    window_1h = count_events(user_id, window=&quot;1h&quot;)
+    window_24h = count_events(user_id, window=&quot;24h&quot;)
+
+    # 3. 组装特征向量 → 模型打分（&lt; 50ms）
+    feature_vector = [
+        int(graph_feat.get(&quot;component_size_3hop&quot;, 0)),
+        int(graph_feat.get(&quot;degree_1hop&quot;, 0)),
+        window_1h,
+        window_24h,
+        window_1h / max(window_24h, 1),  # 短时爆发比
+    ]
+    score = fraud_model.predict([feature_vector])[0]
+
+    # 4. 决策（&lt; 10ms）
+    if score &gt; 0.8:
+        return &quot;reject&quot;
+    elif score &gt; 0.5:
+        return &quot;manual_review&quot;
+    else:
+        return &quot;pass&quot;
+</code></pre>
+<p><strong>关键设计</strong>：图特征离线算、Redis 在线读——图遍历在离线链路完成，在线链路上只有一次 Redis HGETALL。</p>
+<hr>
+<h2>4. 决策引擎：不要只判黑白</h2>
+<p>只判 <code>reject / pass</code> 的太粗糙了。真实业务需要<strong>灰度处理带</strong>：</p>
+<table>
+<thead>
+<tr>
+<th>分数区间</th>
+<th>动作</th>
+<th>业务含义</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>[0.8, 1.0]</td>
+<td>reject</td>
+<td>铁定黑产，直接拒绝</td>
+</tr>
+<tr>
+<td>[0.5, 0.8)</td>
+<td>manual_review</td>
+<td>可疑但不致死，人工复核</td>
+</tr>
+<tr>
+<td>[0.2, 0.5)</td>
+<td>challenge</td>
+<td>滑块验证/短信验证码</td>
+</tr>
+<tr>
+<td>[0, 0.2)</td>
+<td>pass</td>
+<td>正常用户</td>
+</tr>
+</tbody></table>
+<p><code>challenge</code> 带尤其重要——它是对黑产最大的消耗。你不需要阻挡所有黑产，你只需要让攻击成本 &gt; 收益。滑块验证对正常用户多 2 秒，对黑产意味着不能再全自动脚本攻击。</p>
+<h3>决策代码</h3>
+<pre><code class="language-python">def make_decision(score: float, user_history: dict) -&gt; dict:
+    if score &gt;= 0.8:
+        return {&quot;action&quot;: &quot;reject&quot;, &quot;reason&quot;: &quot;high_risk_graph_pattern&quot;}
+    elif score &gt;= 0.5:
+        return {&quot;action&quot;: &quot;manual_review&quot;, &quot;reason&quot;: &quot;suspicious_cluster&quot;}
+    elif score &gt;= 0.2:
+        # 白名单用户跳过 challenge
+        if user_history.get(&quot;challenge_passed_today&quot;):
+            return {&quot;action&quot;: &quot;pass&quot;}
+        return {&quot;action&quot;: &quot;challenge&quot;, &quot;type&quot;: &quot;slider&quot;}
+    else:
+        return {&quot;action&quot;: &quot;pass&quot;}
+</code></pre>
+<hr>
+<h2>5. 模型选型：XGBoost 还够用</h2>
+<p>反欺诈场景的模型不需要很重：</p>
+<table>
+<thead>
+<tr>
+<th>模型</th>
+<th>适用场景</th>
+<th>延迟</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>XGBoost</td>
+<td>在线打分首选，特征 &lt; 200 维</td>
+<td>&lt; 5ms</td>
+</tr>
+<tr>
+<td>GNN (GraphSAGE)</td>
+<td>需要端到端图表示学习</td>
+<td>50-100ms</td>
+</tr>
+<tr>
+<td>规则引擎 (Drools)</td>
+<td>兜底规则，确定性拦截</td>
+<td>&lt; 1ms</td>
+</tr>
+</tbody></table>
+<p>大多数团队不需要 GNN——图特征已经足够强。一个 50 特征的 XGBoost，加上离线图特征，AUC 轻松上 0.92。</p>
+<pre><code class="language-python">import xgboost as xgb
+
+# 训练
+model = xgb.XGBClassifier(
+    n_estimators=100,
+    max_depth=5,
+    learning_rate=0.1,
+    scale_pos_weight=len(negatives) / len(positives),  # 正负样本不平衡
+    eval_metric=&quot;auc&quot;,
+)
+model.fit(X_train, y_train)
+
+# 导出为 PMML → 在线推理
+from sklearn2pmml import PMMLPipeline, sklearn2pmml
+pipeline = PMMLPipeline([(&quot;classifier&quot;, model)])
+sklearn2pmml(pipeline, &quot;fraud_model.pmml&quot;)
+</code></pre>
+<p>PMML 的好处：Java 服务端直接加载，不需要 Python 运行时，推理延迟 &lt; 5ms。</p>
+<hr>
+<h2>6. 一张图总结三角协作</h2>
+<pre><code class="language-mermaid">flowchart LR
+    subgraph 离线
+        A[事件日志] --&gt; B[图构建&lt;br/&gt;Nebula/JanusGraph]
+        B --&gt; C[图特征计算&lt;br/&gt;连通分量/共享邻居]
+        C --&gt; D[(Redis&lt;br/&gt;特征缓存)]
+    end
+
+    subgraph 在线
+        E[注册/登录事件] --&gt; F{实时特征}
+        F --&gt;|图特征| D
+        F --&gt;|时序特征| G[(时序窗口&lt;br/&gt;1h/24h计数)]
+        F --&gt; H[模型打分&lt;br/&gt;XGBoost PMML]
+        H --&gt; I{决策引擎}
+        I --&gt;|0.8+| J[reject]
+        I --&gt;|0.5-0.8| K[人工复核]
+        I --&gt;|0.2-0.5| L[challenge]
+        I --&gt;|&lt;0.2| M[pass]
+    end
+
+    offline --&gt;|回写| I
+</code></pre>
+<hr>
+<h2>7. 关键决策清单</h2>
+<ul>
+<li><input disabled="" type="checkbox"> 构图是否有 device / IP / phone 三个维度？（缺一个黑产就能绕）</li>
+<li><input disabled="" type="checkbox"> 图特征是离线算还是在线算？（在线算图算法必超时）</li>
+<li><input disabled="" type="checkbox"> 决策是否分了至少三档（reject / challenge / pass）？（二分太粗糙）</li>
+<li><input disabled="" type="checkbox"> 是否有白名单机制（已通过验证的用户不再 challenge）？</li>
+<li><input disabled="" type="checkbox"> 模型导出格式是否与在线服务兼容（PMML/ONNX）？</li>
+<li><input disabled="" type="checkbox"> 特征是否有&quot;短时爆发比&quot;？（1 小时 / 24 小时，反应用户行为突变）</li>
+</ul>
+<p>最后一条最容易被忽视——黑产不会按你的节奏慢慢来，他们会在 1 小时内狂注 1000 个账号然后撤离。短时爆发比是抓住这种行为的核心特征。</p>
+<hr>
+<p><em>下一篇预告：AI 应用方向——「Agent 工作流设计：多轮推理、工具编排与状态管理」</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
