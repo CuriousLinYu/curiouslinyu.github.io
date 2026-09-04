@@ -1,0 +1,333 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM贷前材料审核从Demo到生产 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-27</div>
+      <h1 class="post-title">LLM贷前材料审核从Demo到生产</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>用 GPT-4 写了个 Prompt 跑通 10 条测试数据，准确率 95%，产品经理说&quot;下周上线&quot;。三个月后你还在修边角——因为真实场景的材料比测试集脏十倍。</p>
+</blockquote>
+<hr>
+<h2>一、贷前材料审核到底在审什么</h2>
+<p>小微企业申请贷款时，需要上传一堆材料：营业执照、对公流水、纳税证明、经营合同、法人身份证。传统做法是人工审核——一个信审员一天看 30-50 份，看走眼是常态，效率低、标准不统一、高峰期扛不住。</p>
+<p>LLM 入场后，典型任务变成了这样：</p>
+<table>
+<thead>
+<tr>
+<th>材料类型</th>
+<th>审核任务</th>
+<th>LLM 能力需求</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>营业执照</td>
+<td>识别统一社会信用代码、经营范围、注册资本是否匹配</td>
+<td>OCR + 结构化提取</td>
+</tr>
+<tr>
+<td>对公流水</td>
+<td>判断流水是否真实（有没有明显伪造痕迹）、月均入账是否达标</td>
+<td>数值推理 + 异常检测</td>
+</tr>
+<tr>
+<td>纳税证明</td>
+<td>提取年度纳税额，与流水交叉验证</td>
+<td>多文档交叉校验</td>
+</tr>
+<tr>
+<td>经营合同</td>
+<td>判断合同真实性、识别关联交易</td>
+<td>语义理解 + 实体关系抽取</td>
+</tr>
+<tr>
+<td>法人身份证</td>
+<td>OCR 提取 + 公安库比对（OCR 层，LLM 不直接做比对）</td>
+<td>结构化字段提取</td>
+</tr>
+</tbody></table>
+<p><strong>说白了就是：LLM 替代的不是&quot;信审员看材料&quot;这五个字，是&quot;看→提取关键字段→比对一致性→标记疑点→写审核意见&quot;这一整条流水线。</strong></p>
+<hr>
+<h2>二、Demo 怎么写——30 行 Python 跑通</h2>
+<p>先看一个最小可行版本，用 OpenAI API 做营业执照审核：</p>
+<pre><code class="language-python">import openai
+import base64
+from pathlib import Path
+
+client = openai.OpenAI()
+
+def audit_business_license(image_path: str) -&gt; dict:
+    &quot;&quot;&quot;审核营业执照，返回结构化结果&quot;&quot;&quot;
+    with open(image_path, &quot;rb&quot;) as f:
+        image_b64 = base64.b64encode(f.read()).decode()
+
+    response = client.chat.completions.create(
+        model=&quot;gpt-4o&quot;,
+        messages=[{
+            &quot;role&quot;: &quot;user&quot;,
+            &quot;content&quot;: [
+                {
+                    &quot;type&quot;: &quot;text&quot;,
+                    &quot;text&quot;: &quot;&quot;&quot;你是信贷审核专家。请从这张营业执照中提取以下信息，以 JSON 返回：
+{
+  &quot;company_name&quot;: &quot;企业名称&quot;,
+  &quot;credit_code&quot;: &quot;统一社会信用代码（18位）&quot;,
+  &quot;legal_person&quot;: &quot;法定代表人&quot;,
+  &quot;registered_capital&quot;: &quot;注册资本（万元，纯数字）&quot;,
+  &quot;business_scope&quot;: &quot;经营范围（取前100字）&quot;,
+  &quot;establish_date&quot;: &quot;成立日期（YYYY-MM-DD）&quot;,
+  &quot;is_blacklisted&quot;: &quot;经营范围是否包含禁止类目（是/否/不确定）&quot;,
+  &quot;confidence&quot;: &quot;整体置信度（0-1）&quot;
+}
+如果某项无法识别，填写 null。&quot;&quot;&quot;
+                },
+                {
+                    &quot;type&quot;: &quot;image_url&quot;,
+                    &quot;image_url&quot;: {&quot;url&quot;: f&quot;data:image/jpeg;base64,{image_b64}&quot;}
+                }
+            ]
+        }],
+        response_format={&quot;type&quot;: &quot;json_object&quot;},
+        temperature=0.0  # 审核场景必须确定性输出
+    )
+
+    return eval(response.choices[0].message.content)
+
+
+result = audit_business_license(&quot;test_license.jpg&quot;)
+print(f&quot;企业: {result[&#39;company_name&#39;]}&quot;)
+print(f&quot;注册资本: {result[&#39;registered_capital&#39;]}万元&quot;)
+print(f&quot;置信度: {result[&#39;confidence&#39;]}&quot;)
+</code></pre>
+<p>Demo 阶段这 30 行就能让产品经理眼前一亮。但 Demo 和生产的差距，至少隔着下面这六个坑。</p>
+<hr>
+<h2>三、生产落地的六个坑</h2>
+<h3>坑 1：幻觉——LLM 最致命的缺陷</h3>
+<p>真实案例：营业执照上写&quot;壹仟万元整&quot;，LLM 返回 <code>registered_capital: 10000</code>——多了一个零。因为&quot;壹仟万&quot;被识别成了&quot;一千万&quot;。</p>
+<pre><code class="language-python"># 幻觉防御策略：后置校验层
+def validate_capital(ocr_text: str, llm_value: float) -&gt; bool:
+    &quot;&quot;&quot;用传统 OCR（PaddleOCR/EasyOCR）的结果交叉校验 LLM 提取值&quot;&quot;&quot;
+    import re
+    # 传统 OCR 识别中文大写数字
+    cn_num_map = {&#39;零&#39;: 0, &#39;壹&#39;: 1, &#39;贰&#39;: 2, &#39;叁&#39;: 3, &#39;肆&#39;: 4,
+                  &#39;伍&#39;: 5, &#39;陆&#39;: 6, &#39;柒&#39;: 7, &#39;捌&#39;: 8, &#39;玖&#39;: 9}
+    # 如果 OCR 识别出&quot;壹仟万&quot; → 1000万，但 LLM 给了 10000万，触发告警
+    ocr_value = extract_cn_number(ocr_text)  # 传统正则提取
+    if ocr_value and abs(llm_value - ocr_value) / ocr_value &gt; 0.1:
+        return False  # 差异 &gt; 10%，回退人工审核
+    return True
+</code></pre>
+<p><strong>核心原则：LLM 输出必须经过规则校验层，金额类字段尤甚。不要把 LLM 的输出当数据库查询结果用。</strong></p>
+<h3>坑 2：多页 PDF 材料——不是每页都有用</h3>
+<p>银行流水动辄 50 页 PDF，其中 20 页是广告页、封面、条款说明。全部扔给 LLM 既浪费 token 又容易干扰判断。</p>
+<pre><code class="language-python">from pypdf import PdfReader
+
+def extract_relevant_pages(pdf_path: str) -&gt; list[str]:
+    &quot;&quot;&quot;只提取包含交易记录的有效页面&quot;&quot;&quot;
+    reader = PdfReader(pdf_path)
+    relevant_pages = []
+    for i, page in enumerate(reader.pages):
+        text = page.extract_text()
+        # 关键特征：包含日期 + 金额 + 交易摘要
+        has_date = bool(re.search(r&#39;\d{4}[-/]\d{2}[-/]\d{2}&#39;, text))
+        has_amount = bool(re.search(r&#39;[¥￥]\s*\d[\d,]+\.\d{2}&#39;, text))
+        if has_date and has_amount:
+            relevant_pages.append(text)
+    return relevant_pages
+</code></pre>
+<h3>坑 3：多文档交叉校验——营业执照 vs 流水 vs 合同</h3>
+<p>三份材料分别审核完，还得交叉校验：</p>
+<pre><code class="language-python">def cross_validate(license_info: dict, bank_stmt: dict, contract_info: dict) -&gt; list[str]:
+    &quot;&quot;&quot;多文档交叉校验，返回疑点清单&quot;&quot;&quot;
+    flags = []
+
+    # 校验1：流水中的交易对手方是否包含营业执照上的公司名
+    if license_info[&#39;company_name&#39;] not in str(bank_stmt.get(&#39;counterparties&#39;, [])):
+        flags.append(f&quot;银行流水中未发现与[{license_info[&#39;company_name&#39;]}]的交易记录&quot;)
+
+    # 校验2：经营合同金额是否在流水中有对应入账
+    if contract_info.get(&#39;total_amount&#39;):
+        expected = contract_info[&#39;total_amount&#39;]
+        total_inflow = bank_stmt.get(&#39;total_inflow&#39;, 0)
+        if total_inflow &lt; expected * 0.8:
+            flags.append(
+                f&quot;合同金额 {expected} 万，但流水入账仅 {total_inflow} 万（不足80%），疑似虚假合同&quot;
+            )
+
+    # 校验3：营业执照成立日期 vs 合同签订日期（不能先签合同后注册公司）
+    if license_info.get(&#39;establish_date&#39;) and contract_info.get(&#39;sign_date&#39;):
+        if contract_info[&#39;sign_date&#39;] &lt; license_info[&#39;establish_date&#39;]:
+            flags.append(&quot;合同签订日期早于公司成立日期，材料存疑&quot;)
+
+    return flags
+</code></pre>
+<h3>坑 4：Token 成本——一份 50 页流水审下来要多少钱</h3>
+<p>GPT-4o 的 image token 按分辨率计费。一份 50 页 PDF 转图片，每页约 2000 tokens，50 页 = 10 万 tokens。按 $5/1M input tokens 算，一份材料审核成本约 $0.5。</p>
+<pre><code class="language-python"># 成本控制策略：两阶段审核
+# 阶段1：用便宜模型（GPT-4o-mini / Qwen-VL）做初筛
+# 阶段2：只有初筛&quot;可疑&quot;的才送 GPT-4o 做深度审核
+
+def two_stage_audit(image_path: str) -&gt; dict:
+    # 阶段1：轻量模型初筛，成本 ~1/10
+    cheap_result = call_model(&quot;gpt-4o-mini&quot;, image_path, temperature=0.0)
+
+    if cheap_result.get(&#39;confidence&#39;, 0) &gt; 0.9 and not cheap_result.get(&#39;flags&#39;):
+        return cheap_result  # 高置信度 + 无疑点，直接通过
+
+    # 阶段2：只有可疑的才送大模型深度审
+    return call_model(&quot;gpt-4o&quot;, image_path, temperature=0.0)
+</code></pre>
+<h3>坑 5：审核结论的&quot;可解释性&quot;</h3>
+<p>你告诉信审员&quot;模型判断这份材料高风险&quot;，信审员问&quot;为什么&quot;。你不能回答&quot;模型的 hidden state 这么说了&quot;。</p>
+<pre><code class="language-python"># LLM 审核必须产出三段式结论
+audit_output = {
+    &quot;decision&quot;: &quot;人工复核&quot;,        # 通过 / 拒绝 / 人工复核
+    &quot;risk_score&quot;: 0.72,            # 0-1
+    &quot;evidence&quot;: [                  # 关键：必须有证据链
+        {
+            &quot;source&quot;: &quot;营业执照&quot;,
+            &quot;field&quot;: &quot;registered_capital&quot;,
+            &quot;finding&quot;: &quot;注册资本仅 10 万元，低于准入门槛 50 万元&quot;,
+            &quot;severity&quot;: &quot;high&quot;
+        },
+        {
+            &quot;source&quot;: &quot;对公流水_第3页&quot;,
+            &quot;field&quot;: &quot;transaction&quot;,
+            &quot;finding&quot;: &quot;2025-11-15 有一笔 200 万元大额入账，摘要为&#39;借款&#39;，非经营性收入&quot;,
+            &quot;severity&quot;: &quot;medium&quot;
+        }
+    ],
+    &quot;summary&quot;: &quot;注册资本不达标 + 流水存在大额非经营性入账，建议人工复核&quot;
+}
+</code></pre>
+<p><strong>每条 evidence 必须指向具体的材料页和字段，信审员能直接点开原始图片验证。这是 LLM 审核能被业务方接受的前提。</strong></p>
+<h3>坑 6：生产部署——不是 FastAPI 套个壳就完事</h3>
+<pre><code class="language-java">/**
+ * 贷前材料审核服务——生产级实现
+ */
+@Service
+public class MaterialAuditService {
+
+    @Resource
+    private LLMClient llmClient;            // OpenAI / 私有化模型网关
+    @Resource
+    private AuditRuleEngine ruleEngine;     // 规则后置校验层
+    @Resource
+    private AuditResultMapper auditMapper;  // MySQL 持久化
+    @Resource
+    private RedisTemplate&lt;String, Object&gt; redis;
+
+    /**
+     * 审核入口——支持同步 + 异步两种模式
+     */
+    public AuditResponse audit(MaterialAuditRequest request) {
+        String taskId = request.getTaskId();
+
+        // 1. 去重——同一份材料不重复审
+        String cacheKey = &quot;audit:&quot; + hashMaterial(request.getFiles());
+        AuditResponse cached = (AuditResponse) redis.opsForValue().get(cacheKey);
+        if (cached != null) {
+            log.info(&quot;命中缓存, taskId={}&quot;, taskId);
+            return cached;
+        }
+
+        // 2. 材料预处理——压缩、分页过滤、格式归一化
+        List&lt;ProcessedPage&gt; pages = preprocessor.process(request.getFiles());
+
+        // 3. 两阶段审核
+        Stage1Result stage1 = llmClient.audit(&quot;gpt-4o-mini&quot;, pages, request.getAuditType());
+        AuditResponse result;
+        if (stage1.getConfidence() &gt; 0.9 &amp;&amp; stage1.getFlags().isEmpty()) {
+            result = buildResponse(stage1, &quot;通过&quot;);
+        } else {
+            Stage2Result stage2 = llmClient.audit(&quot;gpt-4o&quot;, pages, request.getAuditType());
+            result = buildResponse(stage2, stage2.getDecision());
+        }
+
+        // 4. 规则引擎后置校验——LLM 不可信，必须过规则
+        List&lt;RuleViolation&gt; violations = ruleEngine.validate(result);
+        if (!violations.isEmpty()) {
+            result.setDecision(&quot;人工复核&quot;);
+            result.getFlags().addAll(violations);
+        }
+
+        // 5. 缓存 + 持久化
+        redis.opsForValue().set(cacheKey, result, 24, TimeUnit.HOURS);
+        auditMapper.insert(result, taskId);
+
+        return result;
+    }
+}
+</code></pre>
+<hr>
+<h2>四、哪些场景 LLM 审得了、哪些审不了</h2>
+<table>
+<thead>
+<tr>
+<th>场景</th>
+<th>LLM 能做吗</th>
+<th>说明</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>营业执照信息提取</td>
+<td>✅ 很好</td>
+<td>标准模板、字段固定、结构化输出</td>
+</tr>
+<tr>
+<td>银行流水真伪判断</td>
+<td>⚠️ 部分能做</td>
+<td>能识别明显伪造（金额对不上、格式异常），但专业造假需要规则引擎</td>
+</tr>
+<tr>
+<td>经营合同风险条款识别</td>
+<td>✅ 能做</td>
+<td>识别关联交易、异常条款是 LLM 强项</td>
+</tr>
+<tr>
+<td>身份证 OCR + 公安库比对</td>
+<td>❌ 做不了</td>
+<td>OCR 用传统模型（PaddleOCR），比对走公安接口，LLM 只做字段格式化</td>
+</tr>
+<tr>
+<td>财务报表分析</td>
+<td>⚠️ 审慎</td>
+<td>数字计算容易出错，建议 LLM 只做异常标注，数值校验用规则引擎</td>
+</tr>
+</tbody></table>
+<hr>
+<h2>五、总结</h2>
+<p>LLM 做贷前材料审核，Demo 只需要 30 行代码，生产需要六个防御层。记住五条：</p>
+<ol>
+<li><strong>LLM 输出不可信</strong>——每个关键字段（金额、日期、信用代码）必须过规则校验层，用传统 OCR 做交叉验证</li>
+<li><strong>两阶段审核降成本</strong>——轻量模型初筛 + 大模型深度审，90% 的材料用便宜模型就够了</li>
+<li><strong>审核结论必须有证据链</strong>——每条 risk flag 必须指向具体的材料页和字段，否则信审员不会信任</li>
+<li><strong>多文档交叉校验是 LLM 的杀手锏</strong>——传统 OCR 做不到&quot;营业执照注册资本 10 万但合同金额 500 万&quot;这种跨文档矛盾检测</li>
+<li><strong>LLM 是流水线的一环，不是整个流水线</strong>——OCR 预处理 → LLM 语义理解 → 规则引擎校验 → 人工复核，四个环节缺一不可</li>
+</ol>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
