@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SHAP值在风控模型可解释性中的实战 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-24</div>
+      <h1 class="post-title">SHAP值在风控模型可解释性中的实战</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>标签：信贷风控 · 机器学习 · SHAP · 模型可解释性 · 特征重要性</p>
+</blockquote>
+<h2>一、为什么风控模型必须可解释？</h2>
+<p>信贷审批场景有一个不同于推荐/搜索的死线：<strong>你必须能回答&quot;为什么拒了这笔贷款&quot;</strong>。</p>
+<p>这不是技术偏好，是监管刚需。《个人信息保护法》第 24 条明确说：通过自动化决策作出对个人权益有重大影响的决定时，个人有权要求说明。翻译成人话就是——用户问&quot;为什么拒我&quot;，你不能说&quot;模型说的&quot;。</p>
+<p>传统评分卡的答案很漂亮：</p>
+<pre><code>score = 0.3 × 收入 + 0.25 × 负债比 + 0.2 × 征信分 + ...
+</code></pre>
+<p>每个变量的权重清清楚楚，哪个变量拉低了总分一目了然。这是 <strong>线性可解释性</strong>。</p>
+<p>但 XGBoost、LightGBM 这类 GBDT 模型不是线性的——几百棵树、几千个分裂节点叠加在一起，你怎么解释&quot;为什么这个申贷人被判定为高风险&quot;？</p>
+<p><strong>SHAP（SHapley Additive exPlanations）就是用来回答这个问题的。</strong></p>
+<p>说白了：SHAP 做的事 = &quot;把每个特征对最终预测结果的贡献算清楚，并且保证所有贡献加起来等于最终的预测分&quot;。</p>
+<hr>
+<h2>二、SHAP 的核心原理</h2>
+<h3>2.1 从博弈论到机器学习</h3>
+<p>SHAP 值源于 1953 年诺贝尔经济学奖得主 Lloyd Shapley 提出的 Shapley 值——一个公平分配合作收益的数学方法。</p>
+<p>类比：四个朋友合伙做生意赚了 100 万，每人贡献不同。怎么分钱公平？Shapley 值的答案是：<strong>算每个人在所有可能的&quot;加入顺序&quot;里带来的边际收益平均值</strong>。</p>
+<pre><code>A 加入时的边际收益 = 联盟{A}的收入 - 联盟{}的收入
+B 在 A 之后加入：边际 = 联盟{A,B}的收入 - 联盟{A}的收入
+B 在 A 之前加入：边际 = 联盟{B}的收入 - 联盟{}的收入
+... 所有排列求平均 ...
+</code></pre>
+<p>SHAP 把这个思想搬到机器学习模型上：</p>
+<pre><code>特征&quot;收入&quot;的 SHAP 值
+  = 在所有可能的特征子集组合下
+  × 加入&quot;收入&quot;这个特征带来的预测变化
+  × 求加权平均
+</code></pre>
+<h3>2.2 SHAP 的三个关键性质</h3>
+<table>
+<thead>
+<tr>
+<th>性质</th>
+<th>含义</th>
+<th>为什么重要</th>
+</tr>
+</thead>
+<tbody><tr>
+<td><strong>局部保真</strong></td>
+<td>单个样本的预测 = baseline + Σ SHAP值</td>
+<td>每笔贷款的预测都能被完全拆解</td>
+</tr>
+<tr>
+<td><strong>缺失性</strong></td>
+<td>缺失特征贡献为 0</td>
+<td>不会编造不存在特征的贡献</td>
+</tr>
+<tr>
+<td><strong>一致性</strong></td>
+<td>模型升级后，贡献更大的特征 SHAP 值一定更大</td>
+<td>SHAP 排序和模型行为严格一致</td>
+</tr>
+</tbody></table>
+<p><strong>一致性是 SHAP 相比传统 Feature Importance 最本质的优势。</strong> 传统 Feature Importance 只看&quot;分裂多少次/减少多少不纯度&quot;，不关心方向（正/负贡献），SHAP 能告诉你某个特征对这笔具体贷款是加分还是减分。</p>
+<hr>
+<h2>三、实战代码：从模型训练到 SHAP 解释</h2>
+<h3>3.1 环境准备</h3>
+<pre><code class="language-python">import pandas as pd
+import numpy as np
+import lightgbm as lgb
+import shap
+import matplotlib.pyplot as plt
+from sklearn.model_selection import train_test_split
+
+# 模拟风控数据
+np.random.seed(42)
+n = 50_000
+
+X = pd.DataFrame({
+    &quot;income_monthly&quot;: np.random.lognormal(mean=8.5, sigma=0.6, size=n),     # 月收入
+    &quot;debt_ratio&quot;: np.random.beta(2, 5, size=n) * 100,                        # 负债率 %
+    &quot;credit_score&quot;: np.random.normal(650, 80, size=n).clip(350, 850),        # 征信分
+    &quot;multi_head_count&quot;: np.random.poisson(2, size=n).clip(0, 20),            # 多头借贷平台数
+    &quot;employment_years&quot;: np.random.gamma(2, 3, size=n).clip(0, 40),           # 工作年限
+    &quot;loan_amount&quot;: np.random.lognormal(10, 0.8, size=n),                     # 申请金额
+    &quot;age&quot;: np.random.normal(35, 10, size=n).clip(18, 65).astype(int),        # 年龄
+    &quot;overdue_6m_count&quot;: np.random.poisson(0.5, size=n).clip(0, 10),          # 近6月逾期次数
+})
+
+# 构造标签：坏样本 = 约 15%
+logit = (
+    -0.001 * X[&quot;credit_score&quot;]
+    + 0.05 * X[&quot;debt_ratio&quot;]
+    + 0.15 * X[&quot;multi_head_count&quot;]
+    + 0.8 * X[&quot;overdue_6m_count&quot;]
+    - 0.0005 * X[&quot;income_monthly&quot;]
+    - 0.1 * X[&quot;employment_years&quot;]
+    + 2.0
+)
+prob = 1 / (1 + np.exp(-logit))
+y = (np.random.random(n) &lt; prob).astype(int)
+
+print(f&quot;坏样本率: {y.mean():.2%}&quot;)
+</code></pre>
+<h3>3.2 训练 LightGBM 模型</h3>
+<pre><code class="language-python">X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, stratify=y, random_state=42
+)
+
+model = lgb.LGBMClassifier(
+    objective=&quot;binary&quot;,
+    num_leaves=31,
+    learning_rate=0.05,
+    n_estimators=200,
+    min_data_in_leaf=100,
+    random_state=42,
+    verbosity=-1,
+)
+model.fit(X_train, y_train)
+
+print(f&quot;Test AUC: {model.score(X_test, y_test):.4f}&quot;)
+</code></pre>
+<h3>3.3 SHAP 解释器初始化</h3>
+<pre><code class="language-python"># 方式一：TreeExplainer（树模型专用，最快）
+explainer = shap.TreeExplainer(model)
+# 取测试集前 2000 条做解释（大数据集抽样）
+shap_values = explainer.shap_values(X_test.iloc[:2000])
+
+# shap_values 的 shape: (2000, 8) —— 每个样本每个特征的 SHAP 值
+# 注意 LGBMClassifier 返回 (n, n_features) 而非 (n, n_features, 2)
+print(f&quot;SHAP values shape: {shap_values.shape}&quot;)
+print(f&quot;Sums to model output: {np.allclose(shap_values.sum(1) + explainer.expected_value, np.log(model.predict_proba(X_test.iloc[:2000])[:, 1] / (1 - model.predict_proba(X_test.iloc[:2000])[:, 1])), atol=0.01)}&quot;)
+</code></pre>
+<hr>
+<h2>四、SHAP 四大核心可视化</h2>
+<h3>4.1 Summary Plot：全局特征重要性 + 方向</h3>
+<pre><code class="language-python">shap.summary_plot(shap_values, X_test.iloc[:2000], show=False)
+plt.title(&quot;SHAP Feature Importance: Risk Score&quot;)
+plt.tight_layout()
+plt.savefig(&quot;shap_summary.png&quot;, dpi=150)
+</code></pre>
+<p>这个图一条线说清三件事：</p>
+<ul>
+<li><strong>颜色</strong>：红色 = 高值，蓝色 = 低值</li>
+<li><strong>位置</strong>：x 轴正向 = 推高风险，负向 = 拉低风险</li>
+<li><strong>排列</strong>：y 轴从上到下 = 重要度递减</li>
+</ul>
+<p>典型风控结论：<code>overdue_6m_count</code> 高（红点全在右边）→ 推高风险；<code>credit_score</code> 高（红点在左边）→ 拉低风险。</p>
+<h3>4.2 Waterfall Plot：单笔贷款归因</h3>
+<pre><code class="language-python"># 挑一个被拒的样本（预测概率最高）
+sample_idx = np.argmax(model.predict_proba(X_test.iloc[:2000])[:, 1])
+shap.waterfall_plot(
+    shap.Explanation(
+        values=shap_values[sample_idx],
+        base_values=explainer.expected_value,
+        data=X_test.iloc[:2000].iloc[sample_idx].values,
+        feature_names=X.columns.tolist(),
+    ),
+    show=False,
+)
+</code></pre>
+<p><strong>这个图是给业务/合规用的</strong>。你能精确说出：</p>
+<blockquote>
+<p>&quot;这笔贷款的风险分是 0.82，其中 baseline 0.15，被 <code>overdue_6m_count=4</code> 推高了 0.22，<code>multi_head_count=7</code> 推高了 0.18，<code>credit_score=480</code> 推高了 0.15。但 <code>income_monthly=35000</code> 往回拉了 0.08。&quot;</p>
+</blockquote>
+<p>比&quot;模型说不批&quot;强一万倍。</p>
+<h3>4.3 Dependence Plot：单特征与 SHAP 的依赖关系</h3>
+<pre><code class="language-python"># credit_score 和 SHAP 值的关系
+shap.dependence_plot(
+    &quot;credit_score&quot;, shap_values, X_test.iloc[:2000],
+    interaction_index=&quot;debt_ratio&quot;,  # 自动上色交互最强的特征
+    show=False,
+)
+</code></pre>
+<p>Dependence Plot 能发现非线性关系和交互效应：</p>
+<ul>
+<li>征信分 &lt; 600 时，SHAP 值陡然升高（门槛效应）</li>
+<li>征信分高 + 负债比也高的点，SHAP 值反而中等（模型学到了&quot;能借到钱的人信用其实不差&quot;）</li>
+</ul>
+<h3>4.4 Force Plot：交互式归因</h3>
+<pre><code class="language-python">shap.initjs()
+shap.force_plot(
+    explainer.expected_value,
+    shap_values[0],
+    X_test.iloc[:2000].iloc[0],
+    matplotlib=False,
+)
+</code></pre>
+<p>Force Plot 生成一个交互式 HTML，红蓝箭头左右拔河，直观展示每个特征把预测值往哪边推。<strong>适合直接截图放进评审报告</strong>。</p>
+<hr>
+<h2>五、Java 生产环境集成 SHAP</h2>
+<p>模型训练阶段用 Python 的 SHAP 计算特征重要性，但这只是在实验环境看报告。<strong>线上实时推理要返回解释</strong>的话，有两种路径：</p>
+<h3>路径 A：离线预计算 + 在线查表（推荐）</h3>
+<pre><code class="language-python"># 离线：计算每个特征分箱的 SHAP 均值
+import json
+
+shap_bins = {}
+X_sample = X_test.iloc[:2000].copy()
+for col in X.columns:
+    # 对数值特征做分箱
+    X_sample[f&quot;{col}_bin&quot;] = pd.qcut(X_sample[col], q=10, duplicates=&quot;drop&quot;)
+    bin_means = X_sample.groupby(f&quot;{col}_bin&quot;, observed=False).apply(
+        lambda g: shap_values[X_sample.loc[g.index].index, X.columns.get_loc(col)].mean()
+    )
+    shap_bins[col] = {
+        &quot;intervals&quot;: [str(iv) for iv in bin_means.index.categories],
+        &quot;shap_means&quot;: bin_means.tolist(),
+    }
+
+with open(&quot;shap_lookup.json&quot;, &quot;w&quot;) as f:
+    json.dump(shap_bins, f, indent=2)
+</code></pre>
+<pre><code class="language-java">// Java 线上：查表 + 累加解释
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.*;
+
+public class ShapExplainer {
+    private Map&lt;String, ShapBinInfo&gt; lookupTable;
+    
+    public String explain(Map&lt;String, Double&gt; features) {
+        double totalShap = 0.15;  // baseline
+        StringBuilder sb = new StringBuilder(&quot;风险归因:\n&quot;);
+        
+        for (var entry : features.entrySet()) {
+            String feat = entry.getKey();
+            double val = entry.getValue();
+            ShapBinInfo bin = lookupTable.get(feat);
+            if (bin == null) continue;
+            
+            double shapVal = bin.getShapFor(val);
+            totalShap += shapVal;
+            sb.append(String.format(&quot;  %s = %.1f → %.3f\n&quot;, feat, val, shapVal));
+        }
+        sb.append(String.format(&quot;最终风险分: %.3f&quot;, totalShap));
+        return sb.toString();
+    }
+}
+</code></pre>
+<h3>路径 B：SHAP 内核实时计算（训练时采样基准样本）</h3>
+<pre><code class="language-python"># 离线：保存基准样本集
+shap.sample(X_train, 100).to_csv(&quot;shap_background.csv&quot;, index=False)
+
+# 线上推理服务加载这 100 条背景样本
+# 新请求到达 → 加进背景样本 → 算 SHAP → 移除
+# 这就是 KernelExplainer 的 &quot;扰动法&quot;
+</code></pre>
+<p><strong>实践建议</strong>：路径 A（查表法）延迟 &lt; 1ms，适合实时风控引擎；路径 B 单次计算 50-200ms，适合异步审批场景或只在&quot;被拒后&quot;触发解释。</p>
+<hr>
+<h2>六、SHAP 的三个常见坑</h2>
+<h3>坑 1：把 SHAP 值当因果推断</h3>
+<p>SHAP 告诉你 &quot;这个特征让预测分变化了多少&quot;，<strong>不告诉你 &quot;改了它就会改变结果&quot;</strong>。风控里经常有这种 case：</p>
+<ul>
+<li><code>multi_head_count=7</code> SHAP 值很高，但用户可能是因为征信本身就差才借了 7 家——因果方向反了</li>
+<li>SHAP 是关联不是因果，做策略调整时不能只看 SHAP 就决定&quot;降低多头权重&quot;</li>
+</ul>
+<h3>坑 2：TreeExplainer 的 version 坑</h3>
+<pre><code class="language-python"># Shap &lt; 0.41
+shap_values = explainer.shap_values(X)
+# shape: (n, n_features, 2) —— 二维数组，取 [..., 1]
+
+# Shap &gt;= 0.41
+shap_values = explainer.shap_values(X)
+# shape: (n, n_features) —— 一维数组
+# 但 lightgbm 模型有时仍返回 3D，用下面的兼容写法：
+
+shap_values = explainer(X)
+if isinstance(shap_values, list):
+    shap_values = shap_values[1]  # 二分类取正类
+</code></pre>
+<h3>坑 3：特征量太大时 summary_plot 是废图</h3>
+<p>特征数 &gt; 50 时，Summary Plot 密密麻麻看不清楚。实战做法：</p>
+<pre><code class="language-python"># 只展示 Top 15 特征
+shap.summary_plot(shap_values, X_test.iloc[:2000],
+                  max_display=15, show=False)
+
+# 或用 Bar Plot 只看重要度（忽略方向）
+shap.plots.bar(shap.Explanation(shap_values,
+                 base_values=explainer.expected_value,
+                 feature_names=X.columns), max_display=15)
+</code></pre>
+<hr>
+<h2>七、总结</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>SHAP 的答案</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>哪个特征最重要？</td>
+<td>Summary Plot</td>
+</tr>
+<tr>
+<td>这笔贷款为什么被拒？</td>
+<td>Waterfall Plot</td>
+</tr>
+<tr>
+<td>征信分低于多少开始危险？</td>
+<td>Dependence Plot</td>
+</tr>
+<tr>
+<td>两个特征怎么交互的？</td>
+<td>Dependence Plot + interaction_index</td>
+</tr>
+<tr>
+<td>线上怎么给用户返回解释？</td>
+<td>查表法（&lt; 1ms）</td>
+</tr>
+</tbody></table>
+<p>SHAP 不是银弹——它不会告诉你因果，不会自动发现交互效应，计算成本在某些场景也偏大。但它<strong>解决了风控模型上线最致命的问题：从黑盒到可解释，从&quot;模型说的&quot;到&quot;因为你的多头借贷数远高于同类客群基准&quot;</strong>。</p>
+<hr>
+<p><em>下一篇预告：时间窗口特征设计——近 7 天/30 天/90 天，怎么滚出稳定又有效的时序特征。</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
