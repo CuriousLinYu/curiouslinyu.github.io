@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>信贷风控中AI落地的正确姿势 · CuriousLintYu</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%234f46e5'/%3E%3Ctext x='32' y='43' font-size='28' font-family='Arial' font-weight='bold' fill='white' text-anchor='middle'%3ECLY%3C/text%3E%3C/svg%3E">
+<link rel="stylesheet" href="../assets/style.css">
+</head>
+<body>
+<header class="site-header">
+  <div class="container header-inner">
+    <a class="logo" href="../index.html">Curious<span>Lint</span>Yu</a>
+    <span class="tagline">好奇驱动成长 · AI / 风控 / 工程化</span>
+  </div>
+</header>
+<main class="container">
+  <article class="post">
+    <a class="back" href="../index.html">← 返回文章列表</a>
+    <header class="post-header">
+      <div class="post-date">2026-07-22</div>
+      <h1 class="post-title">信贷风控中AI落地的正确姿势</h1>
+    </header>
+    <div class="post-body">
+<blockquote>
+<p>标签：AI应用开发 · 信贷风控 · 机器学习 · 评分卡</p>
+</blockquote>
+<h2>一、为什么规则引擎不够用了？</h2>
+<p>传统信贷风控靠规则引擎 + 专家经验。比如：</p>
+<ul>
+<li>&quot;年收入 &lt; 5 万 → 拒&quot;</li>
+<li>&quot;近 6 个月逾期次数 &gt; 3 → 拒&quot;</li>
+<li>&quot;多头借贷平台数 &gt; 5 → 拒&quot;</li>
+</ul>
+<p>这套逻辑过去十年确实够用。但问题越来越明显：</p>
+<ol>
+<li><strong>规则膨胀</strong>：几百条 if-else 堆在一起，互相冲突，维护成本高到离谱</li>
+<li><strong>硬切 vs 软分</strong>：规则只能输出过/不过，无法给出&quot;60% 概率会还但风险偏高&quot;这种梯度判断</li>
+<li><strong>迭代滞后</strong>：新欺诈模式出现后至少要等策略分析师几周才能上线新规则</li>
+</ol>
+<p><strong>说白了就是</strong>：规则引擎像一个安检员，要么放行要么拦下。智能评分卡像一个老中医，望闻问切之后给个综合评分。</p>
+<h2>二、评分卡：AI 在风控里最成熟的一招</h2>
+<h3>核心思路</h3>
+<p>把用户的多个维度（收入、负债、征信、行为）映射成一个分数：</p>
+<pre><code>score = w1×收入 + w2×负债比 + w3×征信分 + w4×多头数 + ... + bias
+</code></pre>
+<p>分数越高 → 违约概率越低 → 更容易通过审批。</p>
+<h3>技术栈</h3>
+<pre><code>特征工程（SQL/Flink） → 模型训练（XGBoost/LightGBM） → 分数转换（sigmoid → 0~1000） → API 服务（Python/Java）
+</code></pre>
+<p>关键点：</p>
+<p><strong>1. 特征分箱（Binning）</strong></p>
+<p>别直接用原始值。把&quot;年龄 28 岁&quot;映射成&quot;25-35 岁区间&quot;才有统计意义：</p>
+<pre><code class="language-python"># WOE 编码示例
+bins = [18, 25, 35, 45, 55, 100]
+labels = [&#39;18-25&#39;, &#39;25-35&#39;, &#39;35-45&#39;, &#39;45-55&#39;, &#39;55+&#39;]
+df[&#39;age_bin&#39;] = pd.cut(df[&#39;age&#39;], bins=bins, labels=labels)
+</code></pre>
+<p><strong>2. WOE + IV 筛选特征</strong></p>
+<ul>
+<li>WOE（Weight of Evidence）：每个分箱对&quot;好坏&quot;的区分能力</li>
+<li>IV（Information Value）：整个特征对目标的预测力</li>
+</ul>
+<pre><code class="language-python"># IV &lt; 0.02 → 几乎没用，可以丢掉
+# IV 0.02~0.1 → 弱预测力
+# IV 0.1~0.3 → 中等预测力
+# IV &gt; 0.3 → 强预测力
+</code></pre>
+<p><strong>3. 单调性约束</strong></p>
+<p>部分特征在业务上必须是单调的（收入越高→风险越低），模型不能学出反直觉的模式。</p>
+<h2>三、大模型（LLM）在风控里的真实价值</h2>
+<p>这是最近一年最热的话题。但说清楚：<strong>LLM 不是替代评分卡，是补充评分卡做不了的事</strong>。</p>
+<table>
+<thead>
+<tr>
+<th>能力</th>
+<th>传统评分卡/ML</th>
+<th>LLM</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>数值型特征打分</td>
+<td>✅ 强</td>
+<td>❌ 弱（幻觉风险高）</td>
+</tr>
+<tr>
+<td>非结构化文本理解</td>
+<td>❌ 没法做</td>
+<td>✅ 强</td>
+</tr>
+<tr>
+<td>可解释性</td>
+<td>✅ 分数=加权求和</td>
+<td>⚠️ 需额外设计</td>
+</tr>
+<tr>
+<td>实时性能</td>
+<td>✅ 毫秒级</td>
+<td>⚠️ 需优化</td>
+</tr>
+</tbody></table>
+<h3>LLM 真正能落地的三个场景</h3>
+<p><strong>场景 1：贷前材料审核</strong></p>
+<p>营业执照、银行流水、合同发票——这些非结构化文档传统靠人工审。</p>
+<pre><code>用户上传材料 → OCR 提取文本 → LLM 提取关键字段 → 规则引擎/评分卡打分
+</code></pre>
+<p>关键设计：<strong>LLM 只负责&quot;提取结构化字段&quot;，不负责&quot;判断过不过&quot;</strong>。决策权留在评分卡/规则引擎——避免幻觉风险。</p>
+<p><strong>场景 2：反欺诈关联分析</strong></p>
+<p>用户填写的&quot;工作单位&quot;和&quot;联系人单位&quot;完全不搭边？联系人都是同一个手机号段？这些模式 LLM 可以辅助判断，但最终交给图算法+规则引擎做关联挖掘。</p>
+<p><strong>场景 3：贷后催收策略生成</strong></p>
+<p>根据用户逾期天数、还款意愿评分、历史沟通记录，LLM 生成个性化催收话术。这不是评分，是内容生成，LLM 正好擅长。</p>
+<h2>四、工程落地：AI 应用开发工程师要关注的</h2>
+<h3>1. 模型部署与版本管理</h3>
+<pre><code class="language-yaml"># 评分卡模型上线流程
+训练环境 → 模型注册（MLflow/自建） → A/B 测试（灰度 10%流量）→ 全量上线
+</code></pre>
+<p>每个模型版本要有：</p>
+<ul>
+<li>训练时间 + 训练数据范围</li>
+<li>特征列表（哪些特征、分箱边界）</li>
+<li>KS/AUC 指标</li>
+<li>上线时间 + 回滚记录</li>
+</ul>
+<h3>2. 线上推理链路</h3>
+<pre><code>请求进入 → 特征实时计算（Flink/Redis）→ 模型调用（gRPC/HTTP）→ 分数返回 → 决策 → 落日志
+</code></pre>
+<p><strong>关键设计</strong>：</p>
+<ul>
+<li>特征计算和模型调用分离，特征做缓存</li>
+<li>模型服务超时兜底策略（降级到规则引擎）</li>
+<li>所有决策留 trace：谁、什么特征值、模型版本、分数、判定结果</li>
+</ul>
+<h3>3. 监控和反馈闭环</h3>
+<pre><code>线上分数分布监控 → 实际逾期率 vs 预期逾期率 → KS 漂移检测 → 触发重训
+</code></pre>
+<p>没有监控的模型像没有仪表盘的车——出问题了你不知道。</p>
+<h2>五、总结：三条实用建议</h2>
+<ol>
+<li><strong>先上评分卡，再想 LLM</strong>。评分卡成熟、可控、可解释，是信贷风控 AI 化的第一步。LLM 用来解决评分卡解决不了的非结构化问题。</li>
+<li><strong>LLM 做提取，不做决策</strong>。让 LLM 从文档里提取字段，决策权交给规则引擎 + 评分卡。这是目前最稳妥的分工。</li>
+<li><strong>工程化比算法更重要</strong>。模型部署、版本管理、监控告警、兜底策略——这些工程能力的缺失是 AI 落地失败的真正瓶颈，不是模型精度不够。</li>
+</ol>
+<hr>
+<p><em>下一篇预告：用 Python 从零手写一个信贷评分卡——数据预处理 → WOE 编码 → 逻辑回归 → 转分数 → API 服务，全部可运行代码。</em></p>
+
+    </div>
+  </article>
+</main>
+<footer class="site-footer">
+  <div class="container">© 2026 CuriousLintYu · Powered by curiosity</div>
+</footer>
+</body>
+</html>
