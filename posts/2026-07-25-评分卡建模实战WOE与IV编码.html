@@ -18,10 +18,11 @@
   <article class="post">
     <a class="back" href="../index.html">← 返回文章列表</a>
     <header class="post-header">
-      <div class="post-date">2026-07-25</div>
+      <div class="post-date">2026-07-25 · <span class="card-cat cat-ML">机器学习</span></div>
       <h1 class="post-title">评分卡建模实战WOE与IV编码</h1>
     </header>
     <div class="post-body">
+<h1>评分卡建模实战：WOE/IV 编码与特征分箱</h1>
 <p>信用评分卡是信贷风控的基石模型，从信用卡审批到小微贷款定价，几乎所有金融机构的自动化审批链路里都跑着一套评分卡。这篇文章不讲&quot;评分卡是什么&quot;的百科式介绍，直接讲一个建模工程师上手时最核心的三个问题：怎么分箱、怎么算 WOE/IV、怎么把 WOE 编码后的特征喂进逻辑回归。</p>
 <hr>
 <h2>一、为什么需要 WOE 编码，不能直接把原始特征扔进逻辑回归？</h2>
