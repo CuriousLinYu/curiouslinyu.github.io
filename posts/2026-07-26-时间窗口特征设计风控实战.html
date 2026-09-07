@@ -18,10 +18,11 @@
   <article class="post">
     <a class="back" href="../index.html">← 返回文章列表</a>
     <header class="post-header">
-      <div class="post-date">2026-07-26</div>
+      <div class="post-date">2026-07-26 · <span class="card-cat cat-Risk">风控实战</span></div>
       <h1 class="post-title">时间窗口特征设计风控实战</h1>
     </header>
     <div class="post-body">
+<h1>特征工程：风控领域的时间窗口特征设计</h1>
 <p>时间窗口特征是信贷风控模型中最重要的特征类型之一。一个借款人的历史行为——近 7 天申请了几次、近 30 天登录了几个设备、近 90 天逾期了几次——这些窗口特征的区分能力，往往超过静态特征（年龄、收入、学历）好几个量级。但窗口特征的设计也是一把双刃剑：窗口选错了，要么信息不足，要么引入噪声；更致命的是，窗口特征的计算如果不做&quot;时间穿越防护&quot;，离线验证的 AUC 0.85 上线后直接腰斩。</p>
 <p>这篇文章从四个维度讲时间窗口特征：窗口设计原则、常用窗口模式、防时间穿越的工程实现、以及特征存储与回填。</p>
 <hr>
