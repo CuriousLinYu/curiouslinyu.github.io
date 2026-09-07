@@ -21,9 +21,10 @@
   </section>
   <nav class="cat-nav" id="catNav">
 <button class="chip active" data-cat="all">全部 · 16</button>
-<button class="chip" data-cat="AI">AI 应用 · 7</button>
+<button class="chip" data-cat="AI">AI 应用 · 2</button>
 <button class="chip" data-cat="ML">机器学习 · 4</button>
-<button class="chip" data-cat="Risk">风控实战 · 5</button>
+<button class="chip" data-cat="Risk">风控实战 · 4</button>
+<button class="chip" data-cat="Arch">方案/架构设计 · 6</button>
   </nav>
   <section class="post-list">
     <h2 class="section-title">文章 · <span id="postCount">16</span> 篇</h2>
@@ -38,11 +39,11 @@
           <div class="card-excerpt">特征工程实战：从原始数据到模型入模的完整链路 特征工程占了风控建模 80% 的工作量。不是你模型调得不好，是你的特征根本就没把信息榨干。这篇文章不讲&quot;特征工程很重要&quot;这种废话，只讲怎么做。 --- 1. 时间窗口：风控特征的生命线 风控场景下，所有特征必须带时间窗口。没带窗口的特…</div>
         </a>
       </li>
-      <li class="card" data-cat="AI">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-27-LLM%E8%B4%B7%E5%89%8D%E6%9D%90%E6%96%99%E5%AE%A1%E6%A0%B8%E4%BB%8EDemo%E5%88%B0%E7%94%9F%E4%BA%A7.html">
           <div class="card-meta">
             <span class="card-date">2026-07-27</span>
-            <span class="card-cat cat-AI">AI 应用</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">LLM贷前材料审核从Demo到生产</div>
           <div class="card-excerpt">LLM 贷前材料审核：从 Demo 到生产环境的落地踩坑全记录 用 GPT-4 写了个 Prompt 跑通 10 条测试数据，准确率 95%，产品经理说&quot;下周上线&quot;。三个月后你还在修边角——因为真实场景的材料比测试集脏十倍。 --- 一、贷前材料审核到底在审什么 小微企业申请贷款…</div>
@@ -58,11 +59,11 @@
           <div class="card-excerpt">LLM 在贷前材料审核中的落地 贷前材料审核是信贷流程中最依赖人工的环节之一。借款人上传身份证、营业执照、银行流水、经营合同等材料后，审核员要逐份核对信息一致性、识别 PS 痕迹、提取关键字段、判断材料是否合规。一套中型信贷机构的日均进件量在几百到上千单，每单平均涉及 5-10 …</div>
         </a>
       </li>
-      <li class="card" data-cat="AI">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-27-MCP%E5%85%A8%E9%9D%A2%E7%90%86%E8%A7%A3%E4%BB%8E%E6%9E%B6%E6%9E%84%E5%88%B0%E6%95%B0%E6%8D%AE%E6%B5%81%E7%9A%84%E5%85%A8%E6%99%AF%E8%A7%A3%E6%9E%90.html">
           <div class="card-meta">
             <span class="card-date">2026-07-27</span>
-            <span class="card-cat cat-AI">AI 应用</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">MCP全面理解从架构到数据流的全景解析</div>
           <div class="card-excerpt">MCP 全面理解：从架构到数据流的全景解析 MCP 不是&quot;又一个 API 协议&quot;，它是大模型与外部世界之间的 标准插座 ——有了它，换个模型就像换个电器，插头不变，照常用。 --- 1. MCP 是什么？ MCP（Model Context Protocol，模型上下文协议） 是…</div>
@@ -78,11 +79,11 @@
           <div class="card-excerpt">特征工程：风控领域的时间窗口特征设计 时间窗口特征是信贷风控模型中最重要的特征类型之一。一个借款人的历史行为——近 7 天申请了几次、近 30 天登录了几个设备、近 90 天逾期了几次——这些窗口特征的区分能力，往往超过静态特征（年龄、收入、学历）好几个量级。但窗口特征的设计也是…</div>
         </a>
       </li>
-      <li class="card" data-cat="AI">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-26-Agent%E5%B7%A5%E4%BD%9C%E6%B5%81%E8%AE%BE%E8%AE%A1%E5%A4%9A%E8%BD%AE%E6%8E%A8%E7%90%86%E5%B7%A5%E5%85%B7%E7%BC%96%E6%8E%92%E4%B8%8E%E7%8A%B6%E6%80%81%E7%AE%A1%E7%90%86.html">
           <div class="card-meta">
             <span class="card-date">2026-07-26</span>
-            <span class="card-cat cat-AI">AI 应用</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">Agent工作流设计多轮推理工具编排与状态管理</div>
           <div class="card-excerpt">Agent 工作流设计：多轮推理、工具编排与状态管理 Function Calling 让你调了一个工具，Agent 让你调了一组工具。区别不在&quot;多调了几次&quot;，而在谁来管理调用顺序——是你写死 if-else，还是模型自己迭代决策。 --- 1. Agent 到底是什么？ 一句话…</div>
@@ -98,11 +99,11 @@
           <div class="card-excerpt">KS 漂移检测与 PSI 稳定性：你的风控模型正在悄悄变老 模型上线第一周 KS 0.42，三个月后 KS 0.31。业务方问&quot;是不是模型坏了&quot;，你说&quot;等等看&quot;——再等三个月 KS 跌到 0.19，已经跑了半年的坏账才浮出水面。 --- 一、模型为什么会&quot;变老&quot; 风控模型不是静态…</div>
         </a>
       </li>
-      <li class="card" data-cat="Risk">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-25-%E5%8F%8D%E6%AC%BA%E8%AF%88%E5%AE%9E%E6%88%98%E5%85%B3%E7%B3%BB%E5%9B%BE%E8%B0%B1%E5%AE%9E%E6%97%B6%E7%89%B9%E5%BE%81%E4%B8%8E%E5%86%B3%E7%AD%96%E5%BC%95%E6%93%8E%E7%9A%84%E4%B8%89%E8%A7%92%E5%8D%8F%E4%BD%9C.html">
           <div class="card-meta">
             <span class="card-date">2026-07-25</span>
-            <span class="card-cat cat-Risk">风控实战</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">反欺诈实战关系图谱实时特征与决策引擎的三角协作</div>
           <div class="card-excerpt">反欺诈实战：关系图谱、实时特征与决策引擎的三角协作 反欺诈不是&quot;多写几条规则&quot;的事——黑产在进化，你的规则昨天有效不代表今天有效。这篇文章讲的是工程层怎么搭一套能自演化的反欺诈体系。 --- 1. 为什么规则引擎打不过黑产？ 典型的反欺诈演进路径： 每加一条规则，黑产换一种绕过方…</div>
@@ -128,11 +129,11 @@
           <div class="card-excerpt">时间窗口特征设计：风控模型中最容易被低估的工程问题 模型跑出 AUC 0.82，上线后 KS 跌到 0.18——不是你模型没训好，是你的时间窗口设计埋了雷。 --- 一、什么是时间窗口特征 时间窗口特征，说白了就是在&quot;过去 N 天/N 个月&quot;这个滑动窗口内，对某个实体的行为做聚合…</div>
         </a>
       </li>
-      <li class="card" data-cat="AI">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-24-FunctionCalling%E8%AE%BE%E8%AE%A1%E6%A8%A1%E5%BC%8F%E4%BB%8E%E4%B8%80%E6%AC%A1%E8%B0%83%E7%94%A8%E5%88%B0%E7%94%9F%E4%BA%A7%E7%BA%A7%E5%B7%A5%E5%85%B7%E7%BC%96%E6%8E%92.html">
           <div class="card-meta">
             <span class="card-date">2026-07-24</span>
-            <span class="card-cat cat-AI">AI 应用</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">FunctionCalling设计模式从一次调用到生产级工具编排</div>
           <div class="card-excerpt">Function Calling 设计模式：从一次调用到生产级工具编排 别再用 解析 LLM 返回的 JSON 来做工具调用了——Function Calling 真正的价值在编排层，不在调用层。 --- 1. 你是怎么用 Function Calling 的？ 大多数人的用法：…</div>
@@ -158,11 +159,11 @@
           <div class="card-excerpt">风控模型稳定性监控：PSI 与 KS 指标实战 模型上线不是终点，监控才是风控模型真正的开始。 一、为什么需要模型稳定性监控 信贷风控模型上线后，最怕的不是模型不准，而是模型悄悄变差你还不知道。 一个典型的翻车场景：评分卡上线时 KS=0.35，半年后坏账率突然飙升。排查发现，经…</div>
         </a>
       </li>
-      <li class="card" data-cat="AI">
+      <li class="card" data-cat="Arch">
         <a href="posts/2026-07-23-RAG%E6%9E%B6%E6%9E%84%E4%BB%8EDemo%E5%88%B0%E7%94%9F%E4%BA%A7%E7%9A%84%E5%B7%A5%E7%A8%8B%E5%8C%96%E8%B7%AF%E5%BE%84.html">
           <div class="card-meta">
             <span class="card-date">2026-07-23</span>
-            <span class="card-cat cat-AI">AI 应用</span>
+            <span class="card-cat cat-Arch">方案/架构设计</span>
           </div>
           <div class="card-title">RAG架构从Demo到生产的工程化路径</div>
           <div class="card-excerpt">RAG 架构从 Demo 到生产的工程化路径 一份构建过 3 个生产级 RAG 系统的趟坑总结，不是&quot;对接个 LLM + 向量库就跑&quot;的入门教程。 --- 1. 为什么大多数 RAG Demo 上不了生产？ 你照着 LangChain 的 Quickstart 搭了一个&quot;上传 P…</div>
